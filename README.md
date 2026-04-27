@@ -52,7 +52,7 @@ export function Demo() {
 
 也可以使用 hook：
 
-```tsx
+```vue
 import { useVirtualList } from "inscro/react";
 
 function Demo({ items }: { items: string[] }) {
@@ -78,7 +78,7 @@ function Demo({ items }: { items: string[] }) {
 
 ## Vue 3 用法
 
-```tsx
+```vue
 <script setup lang="ts">
 import { VirtualList } from "inscro/vue";
 
@@ -108,7 +108,7 @@ const items = Array.from({ length: 10000 }, (_, index) => ({
 
 组合式 API：
 
-```tsx
+```ts
 <script setup lang="ts">
 import { useVirtualList } from "inscro/vue";
 
