@@ -5,6 +5,11 @@
 
 一个轻量虚拟列表库，核心算法与框架绑定分离，同时提供 React 和 Vue 3 组件入口。
 
+## Demo
+
+- React demo: [https://aoran997.github.io/inscro/examples/react/](https://aoran997.github.io/inscro/examples/react/)
+- Vue demo: [https://aoran997.github.io/inscro/examples/vue/](https://aoran997.github.io/inscro/examples/vue/)
+
 ## 特性
 
 - 支持纵向和横向虚拟滚动
@@ -272,6 +277,15 @@ npm run demo:vue
 ```
 
 打开 [`http://127.0.0.1:5174`](http://127.0.0.1:5174)。
+
+## 部署 GitHub Pages
+
+仓库已包含 `.github/workflows/deploy-pages.yml`，推送到 `main` 后会自动构建并发布到 GitHub Pages。
+
+GitHub 里需要确认两项：
+
+- `Settings > Pages > Source` 选择 `GitHub Actions`
+- 仓库名保持为 `inscro`；当前构建产物的 base 路径是 `/inscro/`
 
 ## 鸣谢
 

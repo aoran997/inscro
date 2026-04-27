@@ -5,6 +5,14 @@
   "type": "module",
   "license": "MIT",
   "private": false,
+  "homepage": "https://github.com/aoran997/inscro#readme",
+  "bugs": {
+    "url": "https://github.com/aoran997/inscro/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/aoran997/inscro.git"
+  },
   "sideEffects": false,
   "files": [
     "dist",
@@ -39,6 +47,7 @@
   },
   "scripts": {
     "build": "tsup",
+    "build:pages": "vite build --outDir dist-pages",
     "demo:react": "vite examples/react --host 127.0.0.1 --port 5173",
     "demo:vue": "vite examples/vue --host 127.0.0.1 --port 5174",
     "test": "vitest run",
