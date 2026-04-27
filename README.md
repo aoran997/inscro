@@ -1,4 +1,7 @@
-# @inscro/virtual-list
+<h2 style="display: flex;">
+  <img src="./icon.png" alt="inscro icon" width="60" height="60" align="left" style="border-radius: 8px; align-self: center;" />
+  <span style="font-size: 2em; font-weight: 600; margin-left: 0.25em">inscro</span>
+</h2>
 
 一个轻量虚拟列表库，核心算法与框架绑定分离，同时提供 React 和 Vue 3 组件入口。
 
@@ -8,21 +11,20 @@
 - 支持固定尺寸估算和渲染后的动态尺寸测量
 - item 内图片或异步内容加载后会自动重新测量尺寸
 - 支持 `overscan`、`gap`、自定义 item key
-- 同一个 npm 包提供 `@inscro/virtual-list/react` 和 `@inscro/virtual-list/vue`
-- TypeScript 类型随包发布
+- 同一个 npm 包提供 `inscro/react` 和 `inscro/vue`
 
 ## 安装
 
 ```bash
-npm i @inscro/virtual-list
+npm i inscro
 ```
 
-React 项目需要安装 `react >= 18`，Vue 项目需要安装 `vue >= 3.3`。这两个依赖在包里都声明为 optional peer dependency。
+React 项目需要安装 `react >= 18`，Vue 项目需要安装 `vue >= 3.3`。
 
 ## React 用法
 
 ```tsx
-import { VirtualList } from "@inscro/virtual-list/react";
+import { VirtualList } from "inscro/react";
 
 const items = Array.from({ length: 10000 }, (_, index) => ({
   id: index,
@@ -51,7 +53,7 @@ export function Demo() {
 也可以使用 hook：
 
 ```tsx
-import { useVirtualList } from "@inscro/virtual-list/react";
+import { useVirtualList } from "inscro/react";
 
 function Demo({ items }: { items: string[] }) {
   const list = useVirtualList({ items, estimateSize: 40 });
@@ -76,9 +78,9 @@ function Demo({ items }: { items: string[] }) {
 
 ## Vue 3 用法
 
-```vue
+```tsx
 <script setup lang="ts">
-import { VirtualList } from "@inscro/virtual-list/vue";
+import { VirtualList } from "inscro/vue";
 
 const items = Array.from({ length: 10000 }, (_, index) => ({
   id: index,
@@ -106,9 +108,9 @@ const items = Array.from({ length: 10000 }, (_, index) => ({
 
 组合式 API：
 
-```vue
+```tsx
 <script setup lang="ts">
-import { useVirtualList } from "@inscro/virtual-list/vue";
+import { useVirtualList } from "inscro/vue";
 
 const items = Array.from({ length: 10000 }, (_, index) => `Row ${index}`);
 const { containerRef, innerStyle, virtualItems, measureElement } =
@@ -134,7 +136,7 @@ const { containerRef, innerStyle, virtualItems, measureElement } =
 ## Core 用法
 
 ```ts
-import { createVirtualizer } from "@inscro/virtual-list";
+import { createVirtualizer } from "inscro";
 
 const virtualizer = createVirtualizer({
   count: 10000,
@@ -214,10 +216,10 @@ const list = useVirtualList({
 
 ## 用 Pretext 估算文本高度
 
-如果列表 item 主要由多行文本构成，可以用 `@chenglou/pretext` 预估文本高度，减少首次渲染后重新测量带来的滚动修正。这个 helper 通过独立子入口提供，只有显式导入时才会进入你的 bundle。
+如果列表 item 主要由多行文本构成，可以用 [`@chenglou/pretext`](https://github.com/chenglou/pretext) 预估文本高度，减少首次渲染后重新测量带来的滚动修正。这个 helper 通过独立子入口提供，只有显式导入时才会进入你的 bundle。
 
 ```ts
-import { createPretextEstimateSize } from "@inscro/virtual-list/pretext";
+import { createPretextEstimateSize } from "inscro/pretext";
 
 const estimateSize = createPretextEstimateSize({
   getText: (message) => message.text,
@@ -261,7 +263,7 @@ React demo:
 npm run demo:react
 ```
 
-打开 `http://127.0.0.1:5173`。
+打开 [`http://127.0.0.1:5173`](http://127.0.0.1:5173)。
 
 Vue demo:
 
@@ -269,23 +271,8 @@ Vue demo:
 npm run demo:vue
 ```
 
-打开 `http://127.0.0.1:5174`。
+打开 [`http://127.0.0.1:5174`](http://127.0.0.1:5174)。
 
-## 发布到 npm
+## 鸣谢
 
-1. 修改 `package.json` 里的 `name`，确保是你拥有的 npm 包名或 scope。
-2. 更新 `version`。
-3. 执行完整校验：
-
-```bash
-npm run prepublishOnly
-```
-
-4. 登录并发布：
-
-```bash
-npm login
-npm publish --access public
-```
-
-如果改成非 scoped 包名，`npm publish` 即可。
+感谢 [@chenglou/pretext](https://github.com/chenglou/pretext) 提供文本测量能力。

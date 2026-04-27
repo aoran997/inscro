@@ -46,21 +46,51 @@ export type VueEstimateSize<TItem> =
   | number
   | ((index: number, item: TItem) => number);
 
+/**
+ * Options for Vue `useVirtualList`.
+ *
+ * 用法示例：
+ *
+ * ```ts
+ * const list = useVirtualList({
+ *   items: messages,
+ *   estimateSize: 84,
+ *   getItemKey: (message) => message.id,
+ *   initialScrollToBottom: true,
+ *   preserveScrollPosition: true,
+ *   edgeThreshold: 120,
+ *   onReachStart: loadOlderMessages
+ * });
+ * ```
+ */
 export interface UseVirtualListOptions<TItem> {
+  /** Full data array to virtualize. Accepts a plain value, ref, or computed. 要虚拟滚动渲染的完整数据数组，支持普通值、ref 或 computed。 */
   items: MaybeRef<readonly TItem[]>;
+  /** Estimated item size before the real DOM size is measured. DOM 真实尺寸测量前使用的预估 item 尺寸。 */
   estimateSize: MaybeRef<VueEstimateSize<TItem>>;
+  /** Extra item count rendered before and after the visible range. Defaults to 2. 可视区域前后额外渲染的 item 数量，默认 2。 */
   overscan?: MaybeRef<number | undefined>;
+  /** Space in pixels between adjacent items. Defaults to 0. 相邻 item 之间的像素间距，默认 0。 */
   gap?: MaybeRef<number | undefined>;
+  /** Render and scroll on the horizontal axis instead of vertical. 是否使用横向虚拟滚动，默认纵向。 */
   horizontal?: MaybeRef<boolean | undefined>;
+  /** Stable key resolver used to keep measurements and scroll anchors attached to the same item. 稳定 key 生成函数，用来把测量结果和滚动锚点绑定到同一条数据。 */
   getItemKey?: MaybeRef<
     ((item: TItem, index: number) => VirtualItemKey) | undefined
   >;
+  /** Keep the current visible content anchored when items are prepended or measured sizes change. Defaults to true. prepend 数据或 item 高度变化时保持当前可见内容位置，默认 true。 */
   preserveScrollPosition?: MaybeRef<boolean | undefined>;
+  /** Scroll to the bottom after the first non-empty render. 首次有数据渲染后自动滚动到底部，适合聊天记录。 */
   initialScrollToBottom?: MaybeRef<boolean | undefined>;
+  /** Keep the list pinned to the bottom when it is already near the bottom and content changes. 当前已经接近底部时，新增内容或高度变化后继续贴底。 */
   stickToBottom?: MaybeRef<boolean | undefined>;
+  /** Distance in pixels from the bottom that still counts as being at the bottom. Defaults to 24. 距离底部多少像素内仍认为处于底部，默认 24。 */
   bottomThreshold?: MaybeRef<number | undefined>;
+  /** Distance in pixels from either edge used to trigger reach callbacks. Defaults to 0. 距离顶部或底部多少像素时触发边缘回调，默认 0。 */
   edgeThreshold?: MaybeRef<number | undefined>;
+  /** Called when scrolling reaches the start edge within edgeThreshold. 滚动到起始边缘附近时触发，常用于加载更早数据。 */
   onReachStart?: MaybeRef<(() => void) | undefined>;
+  /** Called when scrolling reaches the end edge within edgeThreshold. 滚动到结束边缘附近时触发，常用于加载更新数据。 */
   onReachEnd?: MaybeRef<(() => void) | undefined>;
 }
 
@@ -255,6 +285,9 @@ export function useVirtualList<TItem>(
   });
   const itemObservers = new Map<VirtualItemKey, ItemObserverRecord>();
   let anchorSnapshot: ScrollAnchorSnapshot | null = null;
+  let pendingMeasureAnchorSnapshot: ScrollAnchorSnapshot | null = null;
+  let previousListIdentity = listIdentity.value;
+  let suppressMeasureAnchorCount = 0;
   let initialScrollDone = false;
   let reachedStart = false;
   let reachedEnd = false;
@@ -395,19 +428,33 @@ export function useVirtualList<TItem>(
       ) {
         nextOffset = Math.max(0, totalSize.value - metrics.viewportSize);
         initialScrollDone = true;
-      } else if (anchorSnapshot) {
-        if (shouldStickToBottom && anchorSnapshot.atEnd) {
+      } else if (pendingMeasureAnchorSnapshot || anchorSnapshot) {
+        const listChanged = previousListIdentity !== listIdentity.value;
+        if (listChanged) {
+          suppressMeasureAnchorCount = 2;
+        }
+        const previousAnchor = listChanged
+          ? anchorSnapshot
+          : pendingMeasureAnchorSnapshot ?? anchorSnapshot;
+        pendingMeasureAnchorSnapshot = null;
+        previousListIdentity = listIdentity.value;
+
+        if (!previousAnchor) {
+          return;
+        }
+
+        if (shouldStickToBottom && previousAnchor.atEnd) {
           nextOffset = Math.max(0, totalSize.value - metrics.viewportSize);
         } else if (shouldPreserveScrollPosition) {
           const nextAnchorIndex = resolveAnchorIndex(
             virtualizer.value,
-            anchorSnapshot
+            previousAnchor
           );
 
           if (nextAnchorIndex !== -1) {
             nextOffset =
               virtualizer.value.getStartForIndex(nextAnchorIndex) -
-              anchorSnapshot.offset;
+              previousAnchor.offset;
           }
         }
       }
@@ -432,6 +479,10 @@ export function useVirtualList<TItem>(
         resolveMaybeRef(options.edgeThreshold) ?? 0,
         threshold
       );
+
+      if (suppressMeasureAnchorCount > 0) {
+        suppressMeasureAnchorCount -= 1;
+      }
     },
     { flush: "post" }
   );
@@ -447,6 +498,10 @@ export function useVirtualList<TItem>(
     () => {
       const node = containerRef.value;
       if (!node) {
+        return;
+      }
+
+      if (previousListIdentity !== listIdentity.value) {
         return;
       }
 
@@ -534,7 +589,24 @@ export function useVirtualList<TItem>(
 
       const rect = node.getBoundingClientRect();
       const size = axis.value === "horizontal" ? rect.width : rect.height;
+      const containerNode = containerRef.value;
+      const metrics = containerNode
+        ? getScrollMetrics(containerNode, axis.value)
+        : null;
+      const previousAnchor =
+        containerNode && metrics
+          ? createAnchorSnapshot(
+              virtualizer.value,
+              metrics,
+              resolveMaybeRef(options.edgeThreshold) ?? 0,
+              resolveMaybeRef(options.bottomThreshold) ?? 24
+            )
+          : null;
+
       if (virtualizer.value.measure(index, size)) {
+        if (suppressMeasureAnchorCount === 0) {
+          pendingMeasureAnchorSnapshot = previousAnchor;
+        }
         measurementVersion.value += 1;
       }
     };
@@ -706,6 +778,7 @@ function resolveElement(
 function getContainerStyle(axis: Axis): CSSProperties {
   return {
     overflow: "auto",
+    overflowAnchor: "none",
     position: "relative",
     contain: "strict",
     WebkitOverflowScrolling: "touch",
@@ -717,7 +790,6 @@ function getContainerStyle(axis: Axis): CSSProperties {
 
 function getInnerStyle(axis: Axis, totalSize: number): CSSProperties {
   return {
-    overflowAnchor: "none",
     position: "relative",
     ...(axis === "horizontal"
       ? { width: `${totalSize}px`, height: "100%" }
@@ -760,10 +832,20 @@ function setNodeScrollOffset(
 ): void {
   const boundedOffset = Math.max(0, offset);
 
+  if (behavior === "smooth") {
+    if (axis === "horizontal") {
+      node.scrollTo({ left: boundedOffset, behavior });
+    } else {
+      node.scrollTo({ top: boundedOffset, behavior });
+    }
+
+    return;
+  }
+
   if (axis === "horizontal") {
-    node.scrollTo({ left: boundedOffset, behavior });
+    node.scrollLeft = boundedOffset;
   } else {
-    node.scrollTo({ top: boundedOffset, behavior });
+    node.scrollTop = boundedOffset;
   }
 }
 

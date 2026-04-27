@@ -1,126 +1,287 @@
-import React, { useCallback, useMemo, useState } from "react";
-import { createRoot } from "react-dom/client";
-import { useVirtualList } from "../../../src/react";
-import "./styles.css";
+import { useCallback, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { createRoot } from 'react-dom/client'
+import { useVirtualList } from '../../../src/react'
+import type { ReactVirtualItem } from '../../../src/react'
+import {
+  estimateMessageSize,
+  estimateHorizontalMessageSize,
+  getScenarioCode,
+  getHorizontalMessageSizeClass,
+  makeMessages,
+  makeRandomMessage,
+  pageSize,
+  scenarioConfigs,
+  totalMessageCount,
+} from '../../shared/demo-data'
+import type { ChatMessage, Scenario } from '../../shared/demo-data'
+import './styles.css'
 
-interface ChatMessage {
-  id: number;
-  author: string;
-  text: string;
-  preText?: string;
-  mine: boolean;
-}
-
-const authors = ["Alice", "Bruno", "Chen", "Daria"];
-
-function makeMessages(count: number): ChatMessage[] {
-  return Array.from({ length: count }, (_, index) => {
-    const id = index + 1;
-    const repeat = (index % 4) + 1;
-
-    return {
-      id,
-      author: authors[index % authors.length],
-      text: Array.from(
-        { length: repeat },
-        () => "这是一条聊天消息，内容长度不固定，用来验证向上加载后的滚动锚点。"
-      ).join(" "),
-      preText:
-        index % 8 === 0
-          ? `message_id: ${id}\nauthor: ${authors[index % authors.length]}\nstatus: delivered`
-          : undefined,
-      mine: index % 3 === 0,
-    };
-  });
-}
+const iconUrl = new URL('../../../icon.png', import.meta.url).href
 
 function App() {
-  const allMessages = useMemo(() => makeMessages(1200), []);
-  const [startIndex, setStartIndex] = useState(allMessages.length - 80);
-  const [loadingOlder, setLoadingOlder] = useState(false);
-  const messages = allMessages.slice(startIndex);
-
-  const loadOlder = useCallback(() => {
-    if (loadingOlder || startIndex === 0) {
-      return;
-    }
-
-    setLoadingOlder(true);
-    window.setTimeout(() => {
-      setStartIndex((current) => Math.max(0, current - 40));
-      setLoadingOlder(false);
-    }, 420);
-  }, [loadingOlder, startIndex]);
-
-  const list = useVirtualList({
-    items: messages,
-    estimateSize: (index, message) =>
-      64 + (message.text.length > 70 ? 28 : 0) + (message.preText ? 72 : 0),
-    getItemKey: (message) => message.id,
-    overscan: 10,
-    gap: 10,
-    initialScrollToBottom: true,
-    stickToBottom: true,
-    preserveScrollPosition: true,
-    edgeThreshold: 120,
-    onReachStart: loadOlder
-  });
-
   return (
     <main className="app-shell">
       <header className="toolbar">
-        <div>
-          <h1>React 聊天虚拟列表</h1>
-          <p>
-            已加载 {messages.length} / {allMessages.length} 条，范围{" "}
-            {list.range.startIndex}-{list.range.endIndex}
-          </p>
-        </div>
-        <div className="actions">
-          <button onClick={loadOlder} disabled={loadingOlder || startIndex === 0}>
-            {loadingOlder ? "加载中" : "加载更早"}
-          </button>
-          <button onClick={() => list.scrollToBottom()}>回到底部</button>
+        <div className="brand">
+          <img src={iconUrl} alt="" aria-hidden="true" />
+          <div>
+            <h1>React 聊天虚拟列表</h1>
+            <p>四种列表从上到下同时展示，分别验证纵向和横向的双端加载。</p>
+          </div>
         </div>
       </header>
 
+      <section className="scenario-stack">
+        {(Object.keys(scenarioConfigs) as Scenario[]).map((scenario) => (
+          <ChatListScenario key={scenario} scenario={scenario} />
+        ))}
+      </section>
+    </main>
+  )
+}
+
+function ChatListScenario({ scenario }: { scenario: Scenario }) {
+  const config = scenarioConfigs[scenario]
+  const [loadedStart, setLoadedStart] = useState(config.initialStart)
+  const [loadedEnd, setLoadedEnd] = useState(config.initialEnd)
+  const [insertedMessages, setInsertedMessages] = useState<ChatMessage[]>([])
+  const [loadingOlder, setLoadingOlder] = useState(false)
+  const [loadingNewer, setLoadingNewer] = useState(false)
+  const [showCode, setShowCode] = useState(false)
+  const [insertSeed, setInsertSeed] = useState(1)
+  const didCenterInitialPositionRef = useRef(false)
+  const baseMessages = useMemo(
+    () => makeMessages(loadedStart, loadedEnd),
+    [loadedEnd, loadedStart],
+  )
+  const messages = useMemo(() => {
+    if (insertedMessages.length === 0) {
+      return baseMessages
+    }
+
+    const nextMessages = [...baseMessages]
+    for (const [index, message] of insertedMessages.entries()) {
+      const insertAt = Math.min(
+        nextMessages.length,
+        Math.floor(((index + 1) * nextMessages.length) / (insertedMessages.length + 1)),
+      )
+      nextMessages.splice(insertAt, 0, message)
+    }
+    return nextMessages
+  }, [baseMessages, insertedMessages])
+
+  const canLoadOlder =
+    loadedStart > 0 &&
+    (scenario === 'vertical-prepend' || scenario === 'horizontal-prepend')
+  const canLoadNewer =
+    loadedEnd < totalMessageCount &&
+    (scenario === 'vertical-append' || scenario === 'horizontal-append')
+
+  const loadOlder = useCallback(() => {
+    if (!canLoadOlder || loadingOlder) {
+      return
+    }
+
+    setLoadingOlder(true)
+    window.setTimeout(() => {
+      setLoadedStart((current) => Math.max(0, current - pageSize))
+      setLoadingOlder(false)
+    }, 420)
+  }, [canLoadOlder, loadingOlder])
+
+  const loadNewer = useCallback(() => {
+    if (!canLoadNewer || loadingNewer) {
+      return
+    }
+
+    setLoadingNewer(true)
+    window.setTimeout(() => {
+      setLoadedEnd((current) =>
+        Math.min(totalMessageCount, current + pageSize),
+      )
+      setLoadingNewer(false)
+    }, 420)
+  }, [canLoadNewer, loadingNewer])
+
+  const insertRandomMessage = useCallback(() => {
+    setInsertedMessages((current) => [
+      ...current,
+      makeRandomMessage(insertSeed),
+    ])
+    setInsertSeed((current) => current + 1)
+  }, [insertSeed])
+
+  const list = useVirtualList({
+    items: messages,
+    estimateSize:
+      config.axis === 'horizontal'
+        ? estimateHorizontalMessageSize
+        : estimateMessageSize,
+    getItemKey: (message) => message.id,
+    gap: 10,
+    horizontal: config.axis === 'horizontal',
+    initialScrollToBottom: config.initialPosition === 'bottom',
+    onReachEnd: canLoadNewer ? loadNewer : undefined,
+    onReachStart: canLoadOlder ? loadOlder : undefined,
+    preserveScrollPosition: true,
+    edgeThreshold: 120,
+    stickToBottom:
+      scenario === 'vertical-prepend' || scenario === 'horizontal-prepend',
+  })
+
+  const scrollToStartPoint = useCallback(() => {
+    if (config.initialPosition === 'bottom') {
+      list.scrollToBottom()
+      return
+    }
+
+    if (config.initialPosition === 'center') {
+      list.scrollToIndex(Math.floor(messages.length / 2), 'center')
+      return
+    }
+
+    list.scrollToOffset(0)
+  }, [config.initialPosition, list, messages.length])
+
+  useLayoutEffect(() => {
+    if (
+      config.initialPosition !== 'center' ||
+      didCenterInitialPositionRef.current ||
+      list.range.startIndex === -1
+    ) {
+      return
+    }
+
+    didCenterInitialPositionRef.current = true
+    window.requestAnimationFrame(() => {
+      list.scrollToIndex(Math.floor(messages.length / 2), 'center')
+    })
+  }, [config.initialPosition, list, messages.length])
+
+  return (
+    <section className="scenario-panel">
+      <div className="scenario-toolbar">
+        <div>
+          <strong>{config.title}</strong>
+          <span>
+            已加载 {messages.length} / {totalMessageCount} 条，源范围{' '}
+            {loadedStart + 1}-{loadedEnd}，渲染范围 {list.range.startIndex}-
+            {list.range.endIndex}
+          </span>
+        </div>
+        <div className="actions">
+          <button
+            disabled={!canLoadOlder || loadingOlder}
+            onClick={loadOlder}
+            type="button"
+          >
+            {loadingOlder ? '加载中' : config.loadStartLabel}
+          </button>
+          <button
+            disabled={!canLoadNewer || loadingNewer}
+            onClick={loadNewer}
+            type="button"
+          >
+            {loadingNewer ? '加载中' : config.loadEndLabel}
+          </button>
+          <button onClick={insertRandomMessage} type="button">
+            随机插入
+          </button>
+          <button onClick={scrollToStartPoint} type="button">
+            回到起点
+          </button>
+        </div>
+      </div>
+
       <section
         ref={list.containerRef}
-        className="viewport chat-viewport"
-        aria-label="React chat virtual list"
+        className={`viewport chat-viewport ${
+          config.axis === 'horizontal' ? 'horizontal-viewport' : ''
+        }`}
+        aria-label={`${config.title} virtual list`}
       >
         <div style={list.innerStyle}>
           {list.virtualItems.map((virtualItem) => (
-            <article
+            <MessageRow
+              axis={config.axis}
+              isFirst={virtualItem.index === 0}
+              isLast={virtualItem.index === messages.length - 1}
               key={virtualItem.key}
-              ref={virtualItem.measureRef}
-              className={`message ${virtualItem.item.mine ? "mine" : ""}`}
-              style={virtualItem.style}
-            >
-              <div className="bubble">
-                <div className="message-meta">
-                  <strong>{virtualItem.item.author}</strong>
-                  <span>#{virtualItem.item.id}</span>
-                </div>
-                <p>{virtualItem.item.text}</p>
-                {virtualItem.item.preText ? (
-                  <PreText value={virtualItem.item.preText} />
-                ) : null}
-              </div>
-            </article>
+              virtualItem={virtualItem}
+            />
           ))}
         </div>
       </section>
-    </main>
-  );
+
+      <div className="scenario-footer">
+        <button
+          className="code-toggle"
+          onClick={() => setShowCode((current) => !current)}
+          type="button"
+        >
+          {showCode ? '隐藏代码' : '显示代码'}
+        </button>
+      </div>
+
+      {showCode ? (
+        <pre className="code-panel code-panel-enter">
+          <code>{getScenarioCode('React', scenario)}</code>
+        </pre>
+      ) : null}
+    </section>
+  )
+}
+
+function MessageRow({
+  axis,
+  isFirst,
+  isLast,
+  virtualItem,
+}: {
+  axis: 'horizontal' | 'vertical'
+  isFirst: boolean
+  isLast: boolean
+  virtualItem: ReactVirtualItem<ChatMessage>
+}) {
+  const edgeClass =
+    `${isFirst ? 'edge-start' : ''} ${isLast ? 'edge-end' : ''}`
+  const horizontalSizeClass =
+    axis === 'horizontal'
+      ? getHorizontalMessageSizeClass(virtualItem.item)
+      : ''
+
+  return (
+    <article
+      ref={virtualItem.measureRef}
+      className={`message ${axis === 'horizontal' ? 'horizontal-message' : ''} ${horizontalSizeClass} ${edgeClass} ${
+        virtualItem.item.mine ? 'mine' : ''
+      }`}
+      style={virtualItem.style}
+    >
+      <div className="bubble">
+        <div className="message-meta">
+          <strong>{virtualItem.item.author}</strong>
+          <span>#{virtualItem.item.id}</span>
+        </div>
+        <p>{virtualItem.item.text}</p>
+        {virtualItem.item.image ? (
+          <img
+            alt={virtualItem.item.image.alt}
+            className="message-image"
+            loading="lazy"
+            src={virtualItem.item.image.src}
+          />
+        ) : null}
+        {virtualItem.item.preText ? (
+          <PreText value={virtualItem.item.preText} />
+        ) : null}
+      </div>
+    </article>
+  )
 }
 
 function PreText({ value }: { value: string }) {
-  return <pre className="pretext">{value}</pre>;
+  return <pre className="pretext">{value}</pre>
 }
 
-createRoot(document.getElementById("root") as HTMLElement).render(
-  <React.StrictMode>
-    <App />
-  </React.StrictMode>
-);
+createRoot(document.getElementById('root') as HTMLElement).render(<App />)

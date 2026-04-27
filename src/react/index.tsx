@@ -34,19 +34,49 @@ export type ReactEstimateSize<TItem> =
   | number
   | ((index: number, item: TItem) => number);
 
+/**
+ * Options for React `useVirtualList`.
+ *
+ * 用法示例：
+ *
+ * ```tsx
+ * const list = useVirtualList({
+ *   items: messages,
+ *   estimateSize: 84,
+ *   getItemKey: (message) => message.id,
+ *   initialScrollToBottom: true,
+ *   preserveScrollPosition: true,
+ *   edgeThreshold: 120,
+ *   onReachStart: loadOlderMessages
+ * });
+ * ```
+ */
 export interface UseVirtualListOptions<TItem> {
+  /** Full data array to virtualize. 要虚拟滚动渲染的完整数据数组。 */
   items: readonly TItem[];
+  /** Estimated item size before the real DOM size is measured. DOM 真实尺寸测量前使用的预估 item 尺寸。 */
   estimateSize: ReactEstimateSize<TItem>;
+  /** Extra item count rendered before and after the visible range. Defaults to 2. 可视区域前后额外渲染的 item 数量，默认 2。 */
   overscan?: number;
+  /** Space in pixels between adjacent items. Defaults to 0. 相邻 item 之间的像素间距，默认 0。 */
   gap?: number;
+  /** Render and scroll on the horizontal axis instead of vertical. 是否使用横向虚拟滚动，默认纵向。 */
   horizontal?: boolean;
+  /** Stable key resolver used to keep measurements and scroll anchors attached to the same item. 稳定 key 生成函数，用来把测量结果和滚动锚点绑定到同一条数据。 */
   getItemKey?: (item: TItem, index: number) => VirtualItemKey;
+  /** Keep the current visible content anchored when items are prepended or measured sizes change. Defaults to true. prepend 数据或 item 高度变化时保持当前可见内容位置，默认 true。 */
   preserveScrollPosition?: boolean;
+  /** Scroll to the bottom after the first non-empty render. 首次有数据渲染后自动滚动到底部，适合聊天记录。 */
   initialScrollToBottom?: boolean;
+  /** Keep the list pinned to the bottom when it is already near the bottom and content changes. 当前已经接近底部时，新增内容或高度变化后继续贴底。 */
   stickToBottom?: boolean;
+  /** Distance in pixels from the bottom that still counts as being at the bottom. Defaults to 24. 距离底部多少像素内仍认为处于底部，默认 24。 */
   bottomThreshold?: number;
+  /** Distance in pixels from either edge used to trigger reach callbacks. Defaults to 0. 距离顶部或底部多少像素时触发边缘回调，默认 0。 */
   edgeThreshold?: number;
+  /** Called when scrolling reaches the start edge within edgeThreshold. 滚动到起始边缘附近时触发，常用于加载更早数据。 */
   onReachStart?: () => void;
+  /** Called when scrolling reaches the end edge within edgeThreshold. 滚动到结束边缘附近时触发，常用于加载更新数据。 */
   onReachEnd?: () => void;
 }
 
@@ -132,6 +162,7 @@ export function useVirtualList<TItem>(
     items.length > 0
       ? resolvedGetItemKey(items[items.length - 1] as TItem, items.length - 1)
       : "__empty__";
+  const listIdentity = `${items.length}:${String(firstItemKey)}:${String(lastItemKey)}`;
   const containerRef = useRef<HTMLDivElement>(null);
   const [measurementVersion, setMeasurementVersion] = useState(0);
   const [viewport, setViewport] = useState({
@@ -141,6 +172,10 @@ export function useVirtualList<TItem>(
   const virtualizerRef = useRef<Virtualizer<VirtualItemKey>>();
   const itemObserversRef = useRef(new Map<VirtualItemKey, ItemObserverRecord>());
   const anchorSnapshotRef = useRef<ScrollAnchorSnapshot | null>(null);
+  const pendingMeasureAnchorSnapshotRef =
+    useRef<ScrollAnchorSnapshot | null>(null);
+  const previousListIdentityRef = useRef(listIdentity);
+  const suppressMeasureAnchorCountRef = useRef(0);
   const initialScrollDoneRef = useRef(false);
   const reachedStartRef = useRef(false);
   const reachedEndRef = useRef(false);
@@ -253,9 +288,23 @@ export function useVirtualList<TItem>(
           return;
         }
 
+        const containerNode = containerRef.current;
+        const metrics = containerNode ? getScrollMetrics(containerNode, axis) : null;
+        const previousAnchor =
+          containerNode && metrics
+            ? createAnchorSnapshot(
+                virtualizer,
+                metrics,
+                edgeThreshold,
+                bottomThreshold
+              )
+            : null;
         const rect = node.getBoundingClientRect();
         const size = axis === "horizontal" ? rect.width : rect.height;
         if (virtualizer.measure(index, size)) {
+          if (suppressMeasureAnchorCountRef.current === 0) {
+            pendingMeasureAnchorSnapshotRef.current = previousAnchor;
+          }
           setMeasurementVersion((value) => value + 1);
         }
       };
@@ -286,7 +335,7 @@ export function useVirtualList<TItem>(
 
       record.cleanupImages = observeImageLoads(node, scheduleMeasure);
     },
-    [axis, virtualizer]
+    [axis, bottomThreshold, edgeThreshold, virtualizer]
   );
 
   useIsomorphicLayoutEffect(
@@ -357,7 +406,15 @@ export function useVirtualList<TItem>(
       nextOffset = Math.max(0, totalSize - metrics.viewportSize);
       initialScrollDoneRef.current = true;
     } else {
-      const previousAnchor = anchorSnapshotRef.current;
+      const listChanged = previousListIdentityRef.current !== listIdentity;
+      if (listChanged) {
+        suppressMeasureAnchorCountRef.current = 2;
+      }
+      const previousAnchor = listChanged
+        ? anchorSnapshotRef.current
+        : pendingMeasureAnchorSnapshotRef.current ?? anchorSnapshotRef.current;
+      pendingMeasureAnchorSnapshotRef.current = null;
+      previousListIdentityRef.current = listIdentity;
 
       if (previousAnchor) {
         if (stickToBottom && previousAnchor.atEnd) {
@@ -402,6 +459,10 @@ export function useVirtualList<TItem>(
       edgeThreshold,
       bottomThreshold
     );
+
+    if (suppressMeasureAnchorCountRef.current > 0) {
+      suppressMeasureAnchorCountRef.current -= 1;
+    }
   }, [
     axis,
     totalSize,
@@ -409,6 +470,7 @@ export function useVirtualList<TItem>(
     items.length,
     firstItemKey,
     lastItemKey,
+    listIdentity,
     initialScrollToBottom,
     preserveScrollPosition,
     stickToBottom,
@@ -639,6 +701,7 @@ function createDefaultGetItemKey<TItem>() {
 function getContainerStyle(axis: Axis): CSSProperties {
   return {
     overflow: "auto",
+    overflowAnchor: "none",
     position: "relative",
     contain: "strict",
     WebkitOverflowScrolling: "touch",
@@ -650,7 +713,6 @@ function getContainerStyle(axis: Axis): CSSProperties {
 
 function getInnerStyle(axis: Axis, totalSize: number): CSSProperties {
   return {
-    overflowAnchor: "none",
     position: "relative",
     ...(axis === "horizontal"
       ? { width: totalSize, height: "100%" }
@@ -693,10 +755,20 @@ function setNodeScrollOffset(
 ): void {
   const boundedOffset = Math.max(0, offset);
 
+  if (behavior === "smooth") {
+    if (axis === "horizontal") {
+      node.scrollTo({ left: boundedOffset, behavior });
+    } else {
+      node.scrollTo({ top: boundedOffset, behavior });
+    }
+
+    return;
+  }
+
   if (axis === "horizontal") {
-    node.scrollTo({ left: boundedOffset, behavior });
+    node.scrollLeft = boundedOffset;
   } else {
-    node.scrollTo({ top: boundedOffset, behavior });
+    node.scrollTop = boundedOffset;
   }
 }
 

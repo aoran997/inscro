@@ -1,5 +1,5 @@
 {
-  "name": "@inscro/virtual-list",
+  "name": "inscro",
   "version": "0.1.0",
   "description": "Small virtual list primitives and components for React and Vue.",
   "type": "module",
