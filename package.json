@@ -47,7 +47,7 @@
   },
   "scripts": {
     "build": "tsup",
-    "build:pages": "vite build --outDir dist-pages",
+    "build:pages": "vite build --outDir dist-pages && touch dist-pages/.nojekyll",
     "demo:react": "vite examples/react --host 127.0.0.1 --port 5173",
     "demo:vue": "vite examples/vue --host 127.0.0.1 --port 5174",
     "test": "vitest run",
