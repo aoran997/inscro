@@ -1,5 +1,5 @@
 <h2 style="display: flex;">
-  <img src="./icon.png" alt="inscro icon" width="60" height="60" align="left" style="border-radius: 8px; align-self: center;" />
+  <img src="./icon.png" alt="inscro icon" width="60" height="60" style="border-radius: 8px; align-self: center;" />
   <span style="font-size: 2em; font-weight: 600; margin-left: 0.25em">inscro</span>
 </h2>
 
