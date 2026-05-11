@@ -207,5 +207,7 @@ export function getScenarioCode(framework: "React" | "Vue", scenario: Scenario):
   edgeThreshold: 120,
   onReachStart: ${config.initialStart > 0 ? "loadOlder" : "undefined"},
   onReachEnd: ${config.initialEnd < totalMessageCount ? "loadNewer" : "undefined"}
-});`;
+});
+
+list.scrollToKey("msg-42", "center");`;
 }

@@ -118,6 +118,9 @@ const ChatListScenario = defineComponent({
     const loadingNewer = ref(false)
     const showCode = ref(false)
     const insertSeed = ref(1)
+    const targetKey = ref(
+      `msg-${Math.floor((config.value.initialStart + config.value.initialEnd) / 2) + 1}`,
+    )
     const didCenterInitialPosition = ref(false)
     const baseMessages = computed(() =>
       makeMessages(loadedStart.value, loadedEnd.value),
@@ -225,6 +228,15 @@ const ChatListScenario = defineComponent({
 
       list.scrollToOffset(0)
     }
+    const scrollToTargetKey = (event: Event) => {
+      event.preventDefault()
+      const trimmedKey = targetKey.value.trim()
+      if (trimmedKey.length === 0) {
+        return
+      }
+
+      list.scrollToKey(trimmedKey, 'center')
+    }
     const rangeText = computed(
       () => `${list.range.value.startIndex}-${list.range.value.endIndex}`,
     )
@@ -275,6 +287,19 @@ const ChatListScenario = defineComponent({
             <button onClick={scrollToStartPoint} type="button">
               回到起点
             </button>
+            <form class="key-jump" onSubmit={scrollToTargetKey}>
+              <input
+                aria-label="item key"
+                onInput={(event) => {
+                  targetKey.value = (event.target as HTMLInputElement).value
+                }}
+                placeholder="msg-42"
+                value={targetKey.value}
+              />
+              <button disabled={targetKey.value.trim().length === 0} type="submit">
+                跳转 key
+              </button>
+            </form>
           </div>
         </div>
 

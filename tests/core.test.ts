@@ -90,4 +90,26 @@ describe("Virtualizer", () => {
       })
     ).toBe(25);
   });
+
+  it("calculates scroll offsets from stable keys", () => {
+    const keys = ["a", "b", "c", "d"];
+    const virtualizer = createVirtualizer({
+      count: keys.length,
+      estimateSize: 25,
+      getItemKey: (index) => keys[index] ?? index
+    });
+
+    expect(
+      virtualizer.getOffsetForKey("c", {
+        align: "start",
+        viewportSize: 50
+      })
+    ).toBe(50);
+    expect(
+      virtualizer.getOffsetForKey("missing", {
+        align: "start",
+        viewportSize: 50
+      })
+    ).toBeNull();
+  });
 });

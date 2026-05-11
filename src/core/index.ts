@@ -186,6 +186,15 @@ export class Virtualizer<TKey extends VirtualItemKey = number> {
     return clamp(start, 0, maxOffset);
   }
 
+  getOffsetForKey(key: TKey, options: ScrollToIndexOptions): number | null {
+    const index = this.getIndexForKey(key);
+    if (index === -1) {
+      return null;
+    }
+
+    return this.getOffsetForIndex(index, options);
+  }
+
   getVirtualRange(scrollOffset: number, viewportSize: number): VirtualRange<TKey> {
     this.ensureLayout();
 

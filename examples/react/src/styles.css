@@ -39,6 +39,22 @@ button:disabled {
   opacity: 0.55;
 }
 
+input {
+  border: 1px solid #96a084;
+  border-radius: 6px;
+  color: #17202a;
+  font: inherit;
+  height: 36px;
+  min-width: 0;
+  padding: 0 10px;
+}
+
+input:focus {
+  border-color: #43644f;
+  outline: 2px solid rgba(67, 100, 79, 0.18);
+  outline-offset: 1px;
+}
+
 .app-shell {
   display: grid;
   gap: 16px;
@@ -83,6 +99,15 @@ button:disabled {
   flex-wrap: wrap;
   gap: 8px;
   justify-content: flex-end;
+}
+
+.key-jump {
+  display: flex;
+  gap: 8px;
+}
+
+.key-jump input {
+  width: 128px;
 }
 
 .scenario-panel {
@@ -375,6 +400,15 @@ button:disabled {
 
   .actions {
     justify-content: flex-start;
+  }
+
+  .key-jump {
+    width: 100%;
+  }
+
+  .key-jump input {
+    flex: 1 1 120px;
+    width: auto;
   }
 
   .scenario-toolbar {

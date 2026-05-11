@@ -98,6 +98,11 @@ export interface UseVirtualListReturn<TItem> {
     align?: ScrollToIndexOptions["align"],
     behavior?: ScrollBehavior
   ) => void;
+  scrollToKey: (
+    key: VirtualItemKey,
+    align?: ScrollToIndexOptions["align"],
+    behavior?: ScrollBehavior
+  ) => void;
   scrollToOffset: (offset: number, behavior?: ScrollBehavior) => void;
   scrollToBottom: (behavior?: ScrollBehavior) => void;
 }
@@ -572,6 +577,36 @@ export function useVirtualList<TItem>(
     [axis, scrollToOffset, virtualizer]
   );
 
+  const scrollToKey = useCallback(
+    (
+      key: VirtualItemKey,
+      align: ScrollToIndexOptions["align"] = "start",
+      behavior: ScrollBehavior = "auto"
+    ) => {
+      const node = containerRef.current;
+      if (!node) {
+        return;
+      }
+
+      const viewportSize =
+        axis === "horizontal" ? node.clientWidth : node.clientHeight;
+      const currentOffset =
+        axis === "horizontal" ? node.scrollLeft : node.scrollTop;
+      const offset = virtualizer.getOffsetForKey(key, {
+        align,
+        viewportSize,
+        currentOffset
+      });
+
+      if (offset === null) {
+        return;
+      }
+
+      scrollToOffset(offset, behavior);
+    },
+    [axis, scrollToOffset, virtualizer]
+  );
+
   const scrollToBottom = useCallback(
     (behavior: ScrollBehavior = "auto") => {
       const node = containerRef.current;
@@ -592,6 +627,7 @@ export function useVirtualList<TItem>(
     totalSize,
     innerStyle,
     scrollToIndex,
+    scrollToKey,
     scrollToOffset,
     scrollToBottom
   };

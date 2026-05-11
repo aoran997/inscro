@@ -81,6 +81,12 @@ function Demo({ items }: { items: string[] }) {
 }
 ```
 
+按 item key 跳转到对应内容：
+
+```ts
+list.scrollToKey("message-42", "center");
+```
+
 ## Vue 3 用法
 
 ```ts
@@ -178,6 +184,7 @@ Vue:
 - `gap`: item 间距
 - `horizontal`: 是否横向滚动
 - `getItemKey`: 自定义 key
+- `scrollToKey(key, align?, behavior?)`: 根据 item key 跳转到对应内容，需要配合稳定的 `getItemKey`
 - `initialScrollToBottom`: 首次渲染后滚到底部，适合聊天记录
 - `stickToBottom`: 用户已经在底部时，新增内容或图片加载后继续贴底
 - `preserveScrollPosition`: prepend 数据或上方 item 尺寸变化时保持当前可见内容位置，默认 `true`

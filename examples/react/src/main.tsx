@@ -2,6 +2,7 @@ import { useCallback, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import { useVirtualList } from '../../../src/react'
 import type { ReactVirtualItem } from '../../../src/react'
+import type { FormEvent } from 'react'
 import {
   estimateMessageSize,
   estimateHorizontalMessageSize,
@@ -49,6 +50,9 @@ function ChatListScenario({ scenario }: { scenario: Scenario }) {
   const [loadingNewer, setLoadingNewer] = useState(false)
   const [showCode, setShowCode] = useState(false)
   const [insertSeed, setInsertSeed] = useState(1)
+  const [targetKey, setTargetKey] = useState(
+    `msg-${Math.floor((config.initialStart + config.initialEnd) / 2) + 1}`,
+  )
   const didCenterInitialPositionRef = useRef(false)
   const baseMessages = useMemo(
     () => makeMessages(loadedStart, loadedEnd),
@@ -143,6 +147,19 @@ function ChatListScenario({ scenario }: { scenario: Scenario }) {
     list.scrollToOffset(0)
   }, [config.initialPosition, list, messages.length])
 
+  const scrollToTargetKey = useCallback(
+    (event: FormEvent<HTMLFormElement>) => {
+      event.preventDefault()
+      const trimmedKey = targetKey.trim()
+      if (trimmedKey.length === 0) {
+        return
+      }
+
+      list.scrollToKey(trimmedKey, 'center')
+    },
+    [list, targetKey],
+  )
+
   useLayoutEffect(() => {
     if (
       config.initialPosition !== 'center' ||
@@ -190,6 +207,17 @@ function ChatListScenario({ scenario }: { scenario: Scenario }) {
           <button onClick={scrollToStartPoint} type="button">
             回到起点
           </button>
+          <form className="key-jump" onSubmit={scrollToTargetKey}>
+            <input
+              aria-label="item key"
+              onChange={(event) => setTargetKey(event.target.value)}
+              placeholder="msg-42"
+              value={targetKey}
+            />
+            <button disabled={targetKey.trim().length === 0} type="submit">
+              跳转 key
+            </button>
+          </form>
         </div>
       </div>
 
