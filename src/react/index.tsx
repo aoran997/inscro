@@ -921,11 +921,7 @@ function shouldCallReach(
   edgeKey: VirtualItemKey,
   callback?: () => void
 ): boolean {
-  if (!callback) {
-    return false;
-  }
-
-  return !previous || previous.edgeKey !== edgeKey || previous.callback !== callback;
+  return Boolean(callback && !previous);
 }
 
 function setNodeScrollOffset(
