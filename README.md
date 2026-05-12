@@ -285,44 +285,6 @@ npm run demo:vue
 
 打开 [`http://127.0.0.1:5174`](http://127.0.0.1:5174)。
 
-## 部署 GitHub Pages
-
-当前仓库使用 `demo` 分支作为 GitHub Pages 发布分支，不使用 GitHub Actions Pages workflow。
-
-GitHub 仓库设置：
-
-- 打开 `Settings > Pages`
-- `Source` 选择 `Deploy from a branch`
-- `Branch` 选择 `demo`
-- `Folder` 选择 `/ (root)`
-
-本地构建静态页面：
-
-```bash
-npm run build:pages
-```
-
-这条命令会输出到 `dist-pages/`，并自动生成 `.nojekyll`。
-
-然后把 `dist-pages/` 里的内容发布到 `demo` 分支根目录。一个常见流程是：
-
-```bash
-git switch demo
-cp -R dist-pages/. .
-git add .
-git commit -m "deploy pages"
-git push origin demo
-git switch main
-```
-
-如果 `demo` 分支还不存在，先执行：
-
-```bash
-git switch --orphan demo
-```
-
-注意：`demo` 分支应该只放静态站点产物，不要和源码分支混用。
-
 ## 鸣谢
 
 感谢 [@chenglou/pretext](https://github.com/chenglou/pretext) 提供文本测量能力。
