@@ -201,6 +201,7 @@ export function getScenarioCode(framework: "React" | "Vue", scenario: Scenario):
   getItemKey: (message) => message.id,
   horizontal: ${config.axis === "horizontal"},
   gap: 10,
+  overscanPx: 800,
   initialScrollToBottom: ${maybeComputed}${config.initialPosition === "bottom"}${maybeComputedClose},
   preserveScrollPosition: true,
   stickToBottom: ${maybeComputed}${scenario === "vertical-prepend" || scenario === "horizontal-prepend"}${maybeComputedClose},

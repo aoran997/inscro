@@ -30,6 +30,21 @@ interface ItemObserverRecord {
   frame: number;
 }
 
+interface ScrollSample {
+  scrollOffset: number;
+  viewportSize: number;
+  timestamp: number;
+}
+
+interface ReachRecord {
+  edgeKey: VirtualItemKey;
+  callback?: () => void;
+}
+
+export interface ResetVirtualListOptions {
+  scrollToBottom?: boolean;
+}
+
 export type ReactEstimateSize<TItem> =
   | number
   | ((index: number, item: TItem) => number);
@@ -58,6 +73,8 @@ export interface UseVirtualListOptions<TItem> {
   estimateSize: ReactEstimateSize<TItem>;
   /** Extra item count rendered before and after the visible range. Defaults to 2. 可视区域前后额外渲染的 item 数量，默认 2。 */
   overscan?: number;
+  /** Extra pixel buffer rendered before and after the visible range. 可视区域前后额外渲染的像素缓冲。 */
+  overscanPx?: number;
   /** Space in pixels between adjacent items. Defaults to 0. 相邻 item 之间的像素间距，默认 0。 */
   gap?: number;
   /** Render and scroll on the horizontal axis instead of vertical. 是否使用横向虚拟滚动，默认纵向。 */
@@ -105,6 +122,7 @@ export interface UseVirtualListReturn<TItem> {
   ) => void;
   scrollToOffset: (offset: number, behavior?: ScrollBehavior) => void;
   scrollToBottom: (behavior?: ScrollBehavior) => void;
+  reset: (options?: ResetVirtualListOptions) => void;
 }
 
 export interface VirtualListRenderContext<TItem> {
@@ -140,6 +158,7 @@ export function useVirtualList<TItem>(
     items,
     estimateSize,
     overscan,
+    overscanPx,
     gap,
     horizontal = false,
     getItemKey,
@@ -172,7 +191,8 @@ export function useVirtualList<TItem>(
   const [measurementVersion, setMeasurementVersion] = useState(0);
   const [viewport, setViewport] = useState({
     scrollOffset: 0,
-    viewportSize: 0
+    viewportSize: 0,
+    dynamicOverscanPx: 0
   });
   const virtualizerRef = useRef<Virtualizer<VirtualItemKey>>();
   const itemObserversRef = useRef(new Map<VirtualItemKey, ItemObserverRecord>());
@@ -180,16 +200,19 @@ export function useVirtualList<TItem>(
   const pendingMeasureAnchorSnapshotRef =
     useRef<ScrollAnchorSnapshot | null>(null);
   const previousListIdentityRef = useRef(listIdentity);
-  const suppressMeasureAnchorCountRef = useRef(0);
   const initialScrollDoneRef = useRef(false);
-  const reachedStartRef = useRef(false);
-  const reachedEndRef = useRef(false);
+  const bottomIntentRef = useRef(false);
+  const lastReachStartRef = useRef<ReachRecord | null>(null);
+  const lastReachEndRef = useRef<ReachRecord | null>(null);
+  const lastScrollSampleRef = useRef<ScrollSample | null>(null);
+  const latestTotalSizeRef = useRef(0);
 
   if (!virtualizerRef.current) {
     virtualizerRef.current = new Virtualizer<VirtualItemKey>({
       count: items.length,
       estimateSize: createEstimateSize(estimateSize, items),
       overscan,
+      overscanPx,
       gap,
       getItemKey: createGetItemKey(resolvedGetItemKey, items)
     });
@@ -200,25 +223,48 @@ export function useVirtualList<TItem>(
     count: items.length,
     estimateSize: createEstimateSize(estimateSize, items),
     overscan,
+    overscanPx: Math.max(0, overscanPx ?? 0) + viewport.dynamicOverscanPx,
     gap,
     getItemKey: createGetItemKey(resolvedGetItemKey, items)
   });
 
-  const readViewport = useCallback(() => {
+  const readViewport = useCallback((source: "scroll" | "layout" = "layout") => {
     const node = containerRef.current;
     if (!node) {
       return;
     }
 
     const nextViewport = getScrollMetrics(node, axis);
+    const dynamicOverscanPx =
+      source === "scroll"
+        ? getDynamicOverscanPx(
+            lastScrollSampleRef.current,
+            nextViewport,
+            typeof performance === "undefined" ? Date.now() : performance.now()
+          )
+        : 0;
+    lastScrollSampleRef.current = {
+      ...nextViewport,
+      timestamp:
+        typeof performance === "undefined" ? Date.now() : performance.now()
+    };
+
+    if (
+      source === "scroll" &&
+      bottomIntentRef.current &&
+      !isAtEnd(nextViewport, latestTotalSizeRef.current, bottomThreshold)
+    ) {
+      bottomIntentRef.current = false;
+    }
 
     setViewport((previous) =>
       previous.scrollOffset === nextViewport.scrollOffset &&
-      previous.viewportSize === nextViewport.viewportSize
+      previous.viewportSize === nextViewport.viewportSize &&
+      previous.dynamicOverscanPx === dynamicOverscanPx
         ? previous
-        : nextViewport
+        : { ...nextViewport, dynamicOverscanPx }
     );
-  }, [axis]);
+  }, [axis, bottomThreshold]);
 
   useIsomorphicLayoutEffect(() => {
     const node = containerRef.current;
@@ -240,7 +286,9 @@ export function useVirtualList<TItem>(
       });
     };
 
-    node.addEventListener("scroll", scheduleRead, { passive: true });
+    const handleScroll = () => readViewport("scroll");
+
+    node.addEventListener("scroll", handleScroll, { passive: true });
 
     let resizeObserver: ResizeObserver | undefined;
     if (typeof ResizeObserver !== "undefined") {
@@ -255,7 +303,7 @@ export function useVirtualList<TItem>(
         window.cancelAnimationFrame(animationFrame);
       }
 
-      node.removeEventListener("scroll", scheduleRead);
+      node.removeEventListener("scroll", handleScroll);
       resizeObserver?.disconnect();
 
       if (typeof ResizeObserver === "undefined") {
@@ -307,9 +355,7 @@ export function useVirtualList<TItem>(
         const rect = node.getBoundingClientRect();
         const size = axis === "horizontal" ? rect.width : rect.height;
         if (virtualizer.measure(index, size)) {
-          if (suppressMeasureAnchorCountRef.current === 0) {
-            pendingMeasureAnchorSnapshotRef.current = previousAnchor;
-          }
+          pendingMeasureAnchorSnapshotRef.current ??= previousAnchor;
           setMeasurementVersion((value) => value + 1);
         }
       };
@@ -364,10 +410,12 @@ export function useVirtualList<TItem>(
       virtualizer,
       viewport.scrollOffset,
       viewport.viewportSize,
+      viewport.dynamicOverscanPx,
       measurementVersion,
       items,
       estimateSize,
       overscan,
+      overscanPx,
       gap,
       getItemKey
     ]
@@ -385,6 +433,7 @@ export function useVirtualList<TItem>(
   );
 
   const totalSize = range.totalSize;
+  latestTotalSizeRef.current = totalSize;
   const innerStyle = useMemo(
     () => getInnerStyle(axis, totalSize),
     [axis, totalSize]
@@ -410,11 +459,9 @@ export function useVirtualList<TItem>(
     ) {
       nextOffset = Math.max(0, totalSize - metrics.viewportSize);
       initialScrollDoneRef.current = true;
+      bottomIntentRef.current = true;
     } else {
       const listChanged = previousListIdentityRef.current !== listIdentity;
-      if (listChanged) {
-        suppressMeasureAnchorCountRef.current = 2;
-      }
       const previousAnchor = listChanged
         ? anchorSnapshotRef.current
         : pendingMeasureAnchorSnapshotRef.current ?? anchorSnapshotRef.current;
@@ -422,7 +469,10 @@ export function useVirtualList<TItem>(
       previousListIdentityRef.current = listIdentity;
 
       if (previousAnchor) {
-        if (stickToBottom && previousAnchor.atEnd) {
+        if (
+          bottomIntentRef.current ||
+          (stickToBottom && previousAnchor.atEnd)
+        ) {
           nextOffset = Math.max(0, totalSize - metrics.viewportSize);
         } else if (preserveScrollPosition) {
           const nextAnchorIndex = resolveAnchorIndex(
@@ -454,9 +504,10 @@ export function useVirtualList<TItem>(
     const nextMetrics = getScrollMetrics(node, axis);
     setViewport((previous) =>
       previous.scrollOffset === nextMetrics.scrollOffset &&
-      previous.viewportSize === nextMetrics.viewportSize
+      previous.viewportSize === nextMetrics.viewportSize &&
+      previous.dynamicOverscanPx === 0
         ? previous
-        : nextMetrics
+        : { ...nextMetrics, dynamicOverscanPx: 0 }
     );
     anchorSnapshotRef.current = createAnchorSnapshot(
       virtualizer,
@@ -464,10 +515,6 @@ export function useVirtualList<TItem>(
       edgeThreshold,
       bottomThreshold
     );
-
-    if (suppressMeasureAnchorCountRef.current > 0) {
-      suppressMeasureAnchorCountRef.current -= 1;
-    }
   }, [
     axis,
     totalSize,
@@ -482,6 +529,18 @@ export function useVirtualList<TItem>(
     bottomThreshold,
     virtualizer
   ]);
+
+  useIsomorphicLayoutEffect(() => {
+    if (items.length === 0) {
+      initialScrollDoneRef.current = false;
+      bottomIntentRef.current = false;
+      lastReachStartRef.current = null;
+      lastReachEndRef.current = null;
+      anchorSnapshotRef.current = null;
+      pendingMeasureAnchorSnapshotRef.current = null;
+      lastScrollSampleRef.current = null;
+    }
+  }, [items.length]);
 
   useIsomorphicLayoutEffect(() => {
     const node = containerRef.current;
@@ -518,21 +577,42 @@ export function useVirtualList<TItem>(
     const atEnd =
       viewport.scrollOffset + viewport.viewportSize >= totalSize - threshold;
 
-    if (atStart && !reachedStartRef.current) {
+    if (
+      atStart &&
+      shouldCallReach(lastReachStartRef.current, firstItemKey, onReachStart)
+    ) {
       onReachStart?.();
+      lastReachStartRef.current = {
+        edgeKey: firstItemKey,
+        callback: onReachStart
+      };
     }
 
-    if (atEnd && !reachedEndRef.current) {
+    if (
+      atEnd &&
+      shouldCallReach(lastReachEndRef.current, lastItemKey, onReachEnd)
+    ) {
       onReachEnd?.();
+      lastReachEndRef.current = {
+        edgeKey: lastItemKey,
+        callback: onReachEnd
+      };
     }
 
-    reachedStartRef.current = atStart;
-    reachedEndRef.current = atEnd;
+    if (!atStart) {
+      lastReachStartRef.current = null;
+    }
+
+    if (!atEnd) {
+      lastReachEndRef.current = null;
+    }
   }, [
     viewport.scrollOffset,
     viewport.viewportSize,
     totalSize,
     edgeThreshold,
+    firstItemKey,
+    lastItemKey,
     initialScrollToBottom,
     onReachStart,
     onReachEnd
@@ -546,7 +626,7 @@ export function useVirtualList<TItem>(
       }
 
       setNodeScrollOffset(node, axis, offset, behavior);
-      setViewport(getScrollMetrics(node, axis));
+      setViewport({ ...getScrollMetrics(node, axis), dynamicOverscanPx: 0 });
     },
     [axis]
   );
@@ -620,6 +700,27 @@ export function useVirtualList<TItem>(
     [axis, scrollToOffset, totalSize]
   );
 
+  const reset = useCallback(
+    (resetOptions: ResetVirtualListOptions = {}) => {
+      virtualizer.resetMeasurements();
+      anchorSnapshotRef.current = null;
+      pendingMeasureAnchorSnapshotRef.current = null;
+      initialScrollDoneRef.current = false;
+      bottomIntentRef.current = resetOptions.scrollToBottom ?? false;
+      lastReachStartRef.current = null;
+      lastReachEndRef.current = null;
+      lastScrollSampleRef.current = null;
+      setMeasurementVersion((value) => value + 1);
+
+      if (resetOptions.scrollToBottom) {
+        scrollToBottom("auto");
+      } else {
+        readViewport();
+      }
+    },
+    [readViewport, scrollToBottom, virtualizer]
+  );
+
   return {
     containerRef,
     virtualItems,
@@ -629,7 +730,8 @@ export function useVirtualList<TItem>(
     scrollToIndex,
     scrollToKey,
     scrollToOffset,
-    scrollToBottom
+    scrollToBottom,
+    reset
   };
 }
 
@@ -781,6 +883,49 @@ function getScrollMetrics(node: HTMLElement, axis: Axis) {
     scrollOffset: axis === "horizontal" ? node.scrollLeft : node.scrollTop,
     viewportSize: axis === "horizontal" ? node.clientWidth : node.clientHeight
   };
+}
+
+function getDynamicOverscanPx(
+  previous: ScrollSample | null,
+  next: { scrollOffset: number; viewportSize: number },
+  timestamp: number
+): number {
+  if (!previous || next.viewportSize <= 0) {
+    return 0;
+  }
+
+  const delta = Math.abs(next.scrollOffset - previous.scrollOffset);
+  const elapsed = Math.max(1, timestamp - previous.timestamp);
+  const pixelsPerFrame = (delta / elapsed) * 16;
+
+  if (pixelsPerFrame < next.viewportSize * 0.25) {
+    return 0;
+  }
+
+  return Math.min(next.viewportSize * 4, Math.max(next.viewportSize, delta * 2));
+}
+
+function isAtEnd(
+  metrics: { scrollOffset: number; viewportSize: number },
+  totalSize: number,
+  threshold: number
+): boolean {
+  return (
+    metrics.scrollOffset + metrics.viewportSize >=
+    totalSize - Math.max(0, threshold)
+  );
+}
+
+function shouldCallReach(
+  previous: ReachRecord | null,
+  edgeKey: VirtualItemKey,
+  callback?: () => void
+): boolean {
+  if (!callback) {
+    return false;
+  }
+
+  return !previous || previous.edgeKey !== edgeKey || previous.callback !== callback;
 }
 
 function setNodeScrollOffset(

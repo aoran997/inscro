@@ -181,10 +181,12 @@ Vue:
 - `items`: 数据数组
 - `estimateSize`: 数字，或 `(index, item) => number`
 - `overscan`: 视口外额外渲染数量，默认 `2`
+- `overscanPx`: 视口外额外渲染像素，适合高度差异大或快速滚动的列表
 - `gap`: item 间距
 - `horizontal`: 是否横向滚动
 - `getItemKey`: 自定义 key
 - `scrollToKey(key, align?, behavior?)`: 根据 item key 跳转到对应内容，需要配合稳定的 `getItemKey`
+- `reset({ scrollToBottom? })`: 清空测量缓存、边缘触发状态和初始滚动状态，切换会话/数据源时使用
 - `initialScrollToBottom`: 首次渲染后滚到底部，适合聊天记录
 - `stickToBottom`: 用户已经在底部时，新增内容或图片加载后继续贴底
 - `preserveScrollPosition`: prepend 数据或上方 item 尺寸变化时保持当前可见内容位置，默认 `true`
@@ -206,6 +208,7 @@ const list = useVirtualList({
   initialScrollToBottom: true,
   stickToBottom: true,
   preserveScrollPosition: true,
+  overscanPx: 800,
   edgeThreshold: 120,
   onReachStart: loadOlderMessages
 });
@@ -221,6 +224,7 @@ const list = useVirtualList({
   initialScrollToBottom: true,
   stickToBottom: true,
   preserveScrollPosition: true,
+  overscanPx: 800,
   edgeThreshold: 120,
   onReachStart: loadOlderMessages
 });

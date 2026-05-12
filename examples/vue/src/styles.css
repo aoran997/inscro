@@ -207,7 +207,7 @@ input:focus {
 
 .chat-viewport {
   height: 430px;
-  padding: 0;
+  padding: 12px 0;
 }
 
 .horizontal-viewport {
@@ -215,6 +215,7 @@ input:focus {
     linear-gradient(90deg, rgba(28, 36, 48, 0.06), transparent 120px),
     #ffffff;
   height: 280px;
+  padding: 0 16px;
   overflow-x: auto;
   overflow-y: hidden;
 }
@@ -229,26 +230,10 @@ input:focus {
   justify-content: flex-end;
 }
 
-.message:not(.horizontal-message).edge-start {
-  padding-top: 12px;
-}
-
-.message:not(.horizontal-message).edge-end {
-  padding-bottom: 12px;
-}
-
 .message.horizontal-message {
   align-items: center;
   height: 100%;
   padding: 18px 0;
-}
-
-.message.horizontal-message.edge-start {
-  padding-left: 16px;
-}
-
-.message.horizontal-message.edge-end {
-  padding-right: 16px;
 }
 
 .message.horizontal-message .bubble {

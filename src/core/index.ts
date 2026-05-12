@@ -6,6 +6,7 @@ export interface VirtualizerOptions<TKey extends VirtualItemKey = number> {
   count: number;
   estimateSize: EstimateSize;
   overscan?: number;
+  overscanPx?: number;
   gap?: number;
   getItemKey?: (index: number) => TKey;
 }
@@ -212,8 +213,12 @@ export class Virtualizer<TKey extends VirtualItemKey = number> {
 
     const safeOffset = clamp(scrollOffset, 0, Math.max(0, this.totalSize));
     const safeViewportSize = Math.max(0, viewportSize);
-    const visibleStart = this.findFirstVisibleIndex(safeOffset);
-    const visibleEnd = this.findLastVisibleIndex(safeOffset + safeViewportSize);
+    const visibleStart = this.findFirstVisibleIndex(
+      Math.max(0, safeOffset - this.options.overscanPx)
+    );
+    const visibleEnd = this.findLastVisibleIndex(
+      safeOffset + safeViewportSize + this.options.overscanPx
+    );
     const startIndex = clamp(visibleStart - this.options.overscan, 0, count - 1);
     const endIndex = clamp(visibleEnd + this.options.overscan, startIndex, count - 1);
     const items: Array<VirtualItem<TKey>> = [];
@@ -349,6 +354,7 @@ function normalizeOptions<TKey extends VirtualItemKey>(
     count: Math.max(0, Math.floor(options.count)),
     estimateSize: options.estimateSize,
     overscan: Math.max(0, Math.floor(options.overscan ?? DEFAULT_OVERSCAN)),
+    overscanPx: Math.max(0, options.overscanPx ?? 0),
     gap: Math.max(0, options.gap ?? 0),
     getItemKey: options.getItemKey
   };

@@ -123,6 +123,7 @@ function ChatListScenario({ scenario }: { scenario: Scenario }) {
         : estimateMessageSize,
     getItemKey: (message) => message.id,
     gap: 10,
+    overscanPx: 800,
     horizontal: config.axis === 'horizontal',
     initialScrollToBottom: config.initialPosition === 'bottom',
     onReachEnd: canLoadNewer ? loadNewer : undefined,
@@ -232,8 +233,6 @@ function ChatListScenario({ scenario }: { scenario: Scenario }) {
           {list.virtualItems.map((virtualItem) => (
             <MessageRow
               axis={config.axis}
-              isFirst={virtualItem.index === 0}
-              isLast={virtualItem.index === messages.length - 1}
               key={virtualItem.key}
               virtualItem={virtualItem}
             />
@@ -262,17 +261,11 @@ function ChatListScenario({ scenario }: { scenario: Scenario }) {
 
 function MessageRow({
   axis,
-  isFirst,
-  isLast,
   virtualItem,
 }: {
   axis: 'horizontal' | 'vertical'
-  isFirst: boolean
-  isLast: boolean
   virtualItem: ReactVirtualItem<ChatMessage>
 }) {
-  const edgeClass =
-    `${isFirst ? 'edge-start' : ''} ${isLast ? 'edge-end' : ''}`
   const horizontalSizeClass =
     axis === 'horizontal'
       ? getHorizontalMessageSizeClass(virtualItem.item)
@@ -281,7 +274,7 @@ function MessageRow({
   return (
     <article
       ref={virtualItem.measureRef}
-      className={`message ${axis === 'horizontal' ? 'horizontal-message' : ''} ${horizontalSizeClass} ${edgeClass} ${
+      className={`message ${axis === 'horizontal' ? 'horizontal-message' : ''} ${horizontalSizeClass} ${
         virtualItem.item.mine ? 'mine' : ''
       }`}
       style={virtualItem.style}

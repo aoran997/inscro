@@ -38,14 +38,6 @@ const MessageRow = defineComponent({
       type: String as () => 'horizontal' | 'vertical',
       required: true,
     },
-    isFirst: {
-      type: Boolean,
-      required: true,
-    },
-    isLast: {
-      type: Boolean,
-      required: true,
-    },
     virtualItem: {
       type: Object as () => VueVirtualItem<ChatMessage>,
       required: true,
@@ -71,8 +63,6 @@ const MessageRow = defineComponent({
             props.axis === 'horizontal'
               ? getHorizontalMessageSizeClass(virtualItem.item)
               : '',
-            props.isFirst ? 'edge-start' : '',
-            props.isLast ? 'edge-end' : '',
             virtualItem.item.mine ? 'mine' : '',
           ]}
           style={virtualItem.style}
@@ -199,6 +189,7 @@ const ChatListScenario = defineComponent({
           : estimateMessageSize,
       getItemKey: (message) => message.id,
       gap: 10,
+      overscanPx: 800,
       horizontal: computed(() => config.value.axis === 'horizontal'),
       initialScrollToBottom: computed(
         () => config.value.initialPosition === 'bottom',
@@ -316,8 +307,6 @@ const ChatListScenario = defineComponent({
             {list.virtualItems.value.map((virtualItem) => (
               <MessageRow
                 axis={config.value.axis}
-                isFirst={virtualItem.index === 0}
-                isLast={virtualItem.index === messages.value.length - 1}
                 key={virtualItem.key}
                 measureElement={list.measureElement}
                 virtualItem={virtualItem}

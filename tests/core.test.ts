@@ -112,4 +112,17 @@ describe("Virtualizer", () => {
       })
     ).toBeNull();
   });
+
+  it("expands the rendered range with pixel overscan", () => {
+    const virtualizer = createVirtualizer({
+      count: 20,
+      estimateSize: 20,
+      overscan: 0,
+      overscanPx: 40
+    });
+
+    const range = virtualizer.getVirtualRange(100, 40);
+
+    expect(range.items.map((item) => item.index)).toEqual([3, 4, 5, 6, 7, 8]);
+  });
 });
