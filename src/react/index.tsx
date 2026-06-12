@@ -27,7 +27,6 @@ interface ItemObserverRecord {
   index: number;
   observer?: ResizeObserver;
   cleanupImages?: () => void;
-  frame: number;
 }
 
 interface ScrollSample {
@@ -206,6 +205,10 @@ export function useVirtualList<TItem>(
   const lastReachEndRef = useRef<ReachRecord | null>(null);
   const lastScrollSampleRef = useRef<ScrollSample | null>(null);
   const latestTotalSizeRef = useRef(0);
+  const measureFrameRef = useRef(0);
+  const dirtyMeasurementsRef = useRef(
+    new Map<VirtualItemKey, ItemObserverRecord>()
+  );
 
   if (!virtualizerRef.current) {
     virtualizerRef.current = new Virtualizer<VirtualItemKey>({
@@ -274,40 +277,64 @@ export function useVirtualList<TItem>(
 
     readViewport();
 
-    let animationFrame = 0;
-    const scheduleRead = () => {
-      if (animationFrame !== 0) {
+    let viewportFrame = 0;
+    let scrollFrame = 0;
+    let scrollTimer = 0;
+
+    const scheduleViewportRead = () => {
+      if (viewportFrame !== 0) {
         return;
       }
 
-      animationFrame = window.requestAnimationFrame(() => {
-        animationFrame = 0;
+      viewportFrame = window.requestAnimationFrame(() => {
+        viewportFrame = 0;
         readViewport();
       });
     };
 
-    const handleScroll = () => readViewport("scroll");
+    const scheduleScrollRead = () => {
+      node.classList.add("is-scrolling", "inscro-is-scrolling");
+      window.clearTimeout(scrollTimer);
+      scrollTimer = window.setTimeout(() => {
+        node.classList.remove("is-scrolling", "inscro-is-scrolling");
+      }, 120);
 
-    node.addEventListener("scroll", handleScroll, { passive: true });
+      if (scrollFrame !== 0) {
+        return;
+      }
+
+      scrollFrame = window.requestAnimationFrame(() => {
+        scrollFrame = 0;
+        readViewport("scroll");
+      });
+    };
+
+    node.addEventListener("scroll", scheduleScrollRead, { passive: true });
 
     let resizeObserver: ResizeObserver | undefined;
     if (typeof ResizeObserver !== "undefined") {
-      resizeObserver = new ResizeObserver(scheduleRead);
+      resizeObserver = new ResizeObserver(scheduleViewportRead);
       resizeObserver.observe(node);
     } else {
-      window.addEventListener("resize", scheduleRead);
+      window.addEventListener("resize", scheduleViewportRead);
     }
 
     return () => {
-      if (animationFrame !== 0) {
-        window.cancelAnimationFrame(animationFrame);
+      if (viewportFrame !== 0) {
+        window.cancelAnimationFrame(viewportFrame);
       }
 
-      node.removeEventListener("scroll", handleScroll);
+      if (scrollFrame !== 0) {
+        window.cancelAnimationFrame(scrollFrame);
+      }
+
+      window.clearTimeout(scrollTimer);
+      node.classList.remove("is-scrolling", "inscro-is-scrolling");
+      node.removeEventListener("scroll", scheduleScrollRead);
       resizeObserver?.disconnect();
 
       if (typeof ResizeObserver === "undefined") {
-        window.removeEventListener("resize", scheduleRead);
+        window.removeEventListener("resize", scheduleViewportRead);
       }
     };
   }, [readViewport]);
@@ -330,19 +357,18 @@ export function useVirtualList<TItem>(
         return;
       }
 
-      const record: ItemObserverRecord = {
-        node,
-        index,
-        frame: 0
+      const record: ItemObserverRecord = { node, index };
+
+      const measureNow = () => {
+        dirtyMeasurementsRef.current.set(key, record);
+        flushMeasurements();
       };
 
-      const measure = () => {
-        if (itemObservers.get(key) !== record) {
-          return;
-        }
-
+      const flushMeasurements = () => {
         const containerNode = containerRef.current;
-        const metrics = containerNode ? getScrollMetrics(containerNode, axis) : null;
+        const metrics = containerNode
+          ? getScrollMetrics(containerNode, axis)
+          : null;
         const previousAnchor =
           containerNode && metrics
             ? createAnchorSnapshot(
@@ -352,9 +378,21 @@ export function useVirtualList<TItem>(
                 bottomThreshold
               )
             : null;
-        const rect = node.getBoundingClientRect();
-        const size = axis === "horizontal" ? rect.width : rect.height;
-        if (virtualizer.measure(index, size)) {
+
+        let changed = false;
+        for (const [dirtyKey, dirtyRecord] of dirtyMeasurementsRef.current) {
+          if (itemObservers.get(dirtyKey) !== dirtyRecord) {
+            continue;
+          }
+
+          const rect = dirtyRecord.node.getBoundingClientRect();
+          const size = axis === "horizontal" ? rect.width : rect.height;
+          changed = virtualizer.measure(dirtyRecord.index, size) || changed;
+        }
+
+        dirtyMeasurementsRef.current.clear();
+
+        if (changed) {
           pendingMeasureAnchorSnapshotRef.current ??= previousAnchor;
           setMeasurementVersion((value) => value + 1);
         }
@@ -362,22 +400,24 @@ export function useVirtualList<TItem>(
 
       const scheduleMeasure = () => {
         if (typeof window === "undefined") {
-          measure();
+          measureNow();
           return;
         }
 
-        if (record.frame !== 0) {
+        dirtyMeasurementsRef.current.set(key, record);
+
+        if (measureFrameRef.current !== 0) {
           return;
         }
 
-        record.frame = window.requestAnimationFrame(() => {
-          record.frame = 0;
-          measure();
+        measureFrameRef.current = window.requestAnimationFrame(() => {
+          measureFrameRef.current = 0;
+          flushMeasurements();
         });
       };
 
       itemObservers.set(key, record);
-      measure();
+      scheduleMeasure();
 
       if (typeof ResizeObserver !== "undefined") {
         record.observer = new ResizeObserver(scheduleMeasure);
@@ -396,6 +436,11 @@ export function useVirtualList<TItem>(
       }
 
       itemObserversRef.current.clear();
+      dirtyMeasurementsRef.current.clear();
+      if (measureFrameRef.current !== 0 && typeof window !== "undefined") {
+        window.cancelAnimationFrame(measureFrameRef.current);
+        measureFrameRef.current = 0;
+      }
     },
     []
   );
@@ -841,7 +886,6 @@ function getContainerStyle(axis: Axis): CSSProperties {
     overflow: "auto",
     overflowAnchor: "none",
     position: "relative",
-    contain: "strict",
     WebkitOverflowScrolling: "touch",
     ...(axis === "horizontal"
       ? { width: "100%" }
@@ -862,19 +906,20 @@ function getItemStyle(
   axis: Axis,
   item: VirtualItem<VirtualItemKey>
 ): CSSProperties {
+  if (axis === "horizontal") {
+    return {
+      position: "absolute",
+      top: 0,
+      left: item.start,
+      height: "100%"
+    };
+  }
+
   return {
     position: "absolute",
-    top: 0,
+    top: item.start,
     left: 0,
-    ...(axis === "horizontal"
-      ? {
-          height: "100%",
-          transform: `translateX(${item.start}px)`
-        }
-      : {
-          width: "100%",
-          transform: `translateY(${item.start}px)`
-        })
+    width: "100%"
   };
 }
 
@@ -902,7 +947,7 @@ function getDynamicOverscanPx(
     return 0;
   }
 
-  return Math.min(next.viewportSize * 4, Math.max(next.viewportSize, delta * 2));
+  return Math.min(next.viewportSize * 3, delta * 2);
 }
 
 function isAtEnd(
@@ -998,10 +1043,6 @@ function clamp(value: number, min: number, max: number): number {
 function cleanupItemObserver(record: ItemObserverRecord): void {
   record.observer?.disconnect();
   record.cleanupImages?.();
-
-  if (record.frame !== 0 && typeof window !== "undefined") {
-    window.cancelAnimationFrame(record.frame);
-  }
 }
 
 function observeImageLoads(

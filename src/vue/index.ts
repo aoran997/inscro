@@ -39,7 +39,6 @@ interface ItemObserverRecord {
   index: number;
   observer?: ResizeObserver;
   cleanupImages?: () => void;
-  frame: number;
 }
 
 interface ScrollSample {
@@ -319,6 +318,8 @@ export function useVirtualList<TItem>(
   let lastReachEnd: ReachRecord | null = null;
   let lastScrollSample: ScrollSample | null = null;
   let latestTotalSize = 0;
+  let measureFrame = 0;
+  const dirtyMeasurements = new Map<VirtualItemKey, ItemObserverRecord>();
 
   const updateOptions = () => {
     virtualizer.value.updateOptions(
@@ -366,14 +367,14 @@ export function useVirtualList<TItem>(
     }
   };
 
-  let animationFrame = 0;
-  const scheduleRead = () => {
-    if (typeof window === "undefined" || animationFrame !== 0) {
+  let viewportFrame = 0;
+  const scheduleViewportRead = () => {
+    if (typeof window === "undefined" || viewportFrame !== 0) {
       return;
     }
 
-    animationFrame = window.requestAnimationFrame(() => {
-      animationFrame = 0;
+    viewportFrame = window.requestAnimationFrame(() => {
+      viewportFrame = 0;
       readViewport();
     });
   };
@@ -387,27 +388,51 @@ export function useVirtualList<TItem>(
     }
 
     readViewport();
-    const handleScroll = () => readViewport("scroll");
-    node.addEventListener("scroll", handleScroll, { passive: true });
+    let scrollFrame = 0;
+    let scrollTimer = 0;
+    const scheduleScrollRead = () => {
+      node.classList.add("is-scrolling", "inscro-is-scrolling");
+      window.clearTimeout(scrollTimer);
+      scrollTimer = window.setTimeout(() => {
+        node.classList.remove("is-scrolling", "inscro-is-scrolling");
+      }, 120);
+
+      if (scrollFrame !== 0) {
+        return;
+      }
+
+      scrollFrame = window.requestAnimationFrame(() => {
+        scrollFrame = 0;
+        readViewport("scroll");
+      });
+    };
+
+    node.addEventListener("scroll", scheduleScrollRead, { passive: true });
 
     let resizeObserver: ResizeObserver | undefined;
     if (typeof ResizeObserver !== "undefined") {
-      resizeObserver = new ResizeObserver(scheduleRead);
+      resizeObserver = new ResizeObserver(scheduleViewportRead);
       resizeObserver.observe(node);
     } else {
-      window.addEventListener("resize", scheduleRead);
+      window.addEventListener("resize", scheduleViewportRead);
     }
 
     cleanup = () => {
-      if (animationFrame !== 0) {
-        window.cancelAnimationFrame(animationFrame);
+      if (viewportFrame !== 0) {
+        window.cancelAnimationFrame(viewportFrame);
       }
 
-      node.removeEventListener("scroll", handleScroll);
+      if (scrollFrame !== 0) {
+        window.cancelAnimationFrame(scrollFrame);
+      }
+
+      window.clearTimeout(scrollTimer);
+      node.classList.remove("is-scrolling", "inscro-is-scrolling");
+      node.removeEventListener("scroll", scheduleScrollRead);
       resizeObserver?.disconnect();
 
       if (typeof ResizeObserver === "undefined") {
-        window.removeEventListener("resize", scheduleRead);
+        window.removeEventListener("resize", scheduleViewportRead);
       }
     };
   });
@@ -415,6 +440,11 @@ export function useVirtualList<TItem>(
   onBeforeUnmount(() => {
     cleanup?.();
     cleanupItemObservers(itemObservers);
+    dirtyMeasurements.clear();
+    if (measureFrame !== 0 && typeof window !== "undefined") {
+      window.cancelAnimationFrame(measureFrame);
+      measureFrame = 0;
+    }
   });
 
   watch(axis, () => {
@@ -664,19 +694,9 @@ export function useVirtualList<TItem>(
       return;
     }
 
-    const record: ItemObserverRecord = {
-      node,
-      index,
-      frame: 0
-    };
+    const record: ItemObserverRecord = { node, index };
 
-    const measure = () => {
-      if (itemObservers.get(key) !== record) {
-        return;
-      }
-
-      const rect = node.getBoundingClientRect();
-      const size = axis.value === "horizontal" ? rect.width : rect.height;
+    const flushMeasurements = () => {
       const containerNode = containerRef.value;
       const metrics = containerNode
         ? getScrollMetrics(containerNode, axis.value)
@@ -691,7 +711,21 @@ export function useVirtualList<TItem>(
             )
           : null;
 
-      if (virtualizer.value.measure(index, size)) {
+      let changed = false;
+      for (const [dirtyKey, dirtyRecord] of dirtyMeasurements) {
+        if (itemObservers.get(dirtyKey) !== dirtyRecord) {
+          continue;
+        }
+
+        const rect = dirtyRecord.node.getBoundingClientRect();
+        const size = axis.value === "horizontal" ? rect.width : rect.height;
+        changed =
+          virtualizer.value.measure(dirtyRecord.index, size) || changed;
+      }
+
+      dirtyMeasurements.clear();
+
+      if (changed) {
         pendingMeasureAnchorSnapshot ??= previousAnchor;
         measurementVersion.value += 1;
       }
@@ -699,22 +733,25 @@ export function useVirtualList<TItem>(
 
     const scheduleMeasure = () => {
       if (typeof window === "undefined") {
-        measure();
+        dirtyMeasurements.set(key, record);
+        flushMeasurements();
         return;
       }
 
-      if (record.frame !== 0) {
+      dirtyMeasurements.set(key, record);
+
+      if (measureFrame !== 0) {
         return;
       }
 
-      record.frame = window.requestAnimationFrame(() => {
-        record.frame = 0;
-        measure();
+      measureFrame = window.requestAnimationFrame(() => {
+        measureFrame = 0;
+        flushMeasurements();
       });
     };
 
     itemObservers.set(key, record);
-    measure();
+    scheduleMeasure();
 
     if (typeof ResizeObserver !== "undefined") {
       record.observer = new ResizeObserver(scheduleMeasure);
@@ -919,7 +956,6 @@ function getContainerStyle(axis: Axis): CSSProperties {
     overflow: "auto",
     overflowAnchor: "none",
     position: "relative",
-    contain: "strict",
     WebkitOverflowScrolling: "touch",
     ...(axis === "horizontal"
       ? { width: "100%" }
@@ -940,19 +976,20 @@ function getItemStyle(
   axis: Axis,
   item: VirtualItem<VirtualItemKey>
 ): CSSProperties {
+  if (axis === "horizontal") {
+    return {
+      position: "absolute",
+      top: "0",
+      left: `${item.start}px`,
+      height: "100%"
+    };
+  }
+
   return {
     position: "absolute",
-    top: "0",
+    top: `${item.start}px`,
     left: "0",
-    ...(axis === "horizontal"
-      ? {
-          height: "100%",
-          transform: `translateX(${item.start}px)`
-        }
-      : {
-          width: "100%",
-          transform: `translateY(${item.start}px)`
-        })
+    width: "100%"
   };
 }
 
@@ -980,7 +1017,7 @@ function getDynamicOverscanPx(
     return 0;
   }
 
-  return Math.min(next.viewportSize * 4, Math.max(next.viewportSize, delta * 2));
+  return Math.min(next.viewportSize * 3, delta * 2);
 }
 
 function isAtEnd(
@@ -1086,10 +1123,6 @@ function cleanupItemObservers(
 function cleanupItemObserver(record: ItemObserverRecord): void {
   record.observer?.disconnect();
   record.cleanupImages?.();
-
-  if (record.frame !== 0 && typeof window !== "undefined") {
-    window.cancelAnimationFrame(record.frame);
-  }
 }
 
 function observeImageLoads(
