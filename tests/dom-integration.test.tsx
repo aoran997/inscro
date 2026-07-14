@@ -22,6 +22,7 @@ import {
 } from "vitest";
 import {
   useVirtualList,
+  type ReactVirtualItem,
   type UseVirtualListReturn as ReactVirtualListReturn
 } from "../src/react";
 import { VirtualList as VueVirtualList } from "../src/vue";
@@ -36,6 +37,7 @@ interface ReactHarnessProps {
   estimateSize: (index: number, item: TestItem) => number;
   tick?: number;
   onReachStart?: () => void;
+  onItemMount?: (key: string) => void;
 }
 
 let latestReactList: ReactVirtualListReturn<TestItem> | null = null;
@@ -45,7 +47,8 @@ function ReactHarness({
   items,
   estimateSize,
   tick = 0,
-  onReachStart
+  onReachStart,
+  onItemMount
 }: ReactHarnessProps) {
   const list = useVirtualList({
     items,
@@ -65,21 +68,46 @@ function ReactHarness({
     >
       <div style={list.innerStyle}>
         {list.virtualItems.map((virtualItem) => (
-          <div
+          <ReactHarnessItem
             key={virtualItem.key}
-            ref={virtualItem.measureRef}
-            style={virtualItem.style}
-          >
-            <span
-              data-height={virtualItem.item.height}
-              data-item-key={virtualItem.item.id}
-              data-tick={tick}
-            >
-              {virtualItem.item.id}
-            </span>
-          </div>
+            onItemMount={onItemMount}
+            tick={tick}
+            virtualItem={virtualItem}
+          />
         ))}
       </div>
+    </div>
+  );
+}
+
+function ReactHarnessItem({
+  onItemMount,
+  tick,
+  virtualItem
+}: {
+  onItemMount?: (key: string) => void;
+  tick: number;
+  virtualItem: ReactVirtualItem<TestItem>;
+}) {
+  const ref = React.useCallback(
+    (node: HTMLElement | null) => {
+      virtualItem.measureRef(node);
+      if (node) {
+        onItemMount?.(virtualItem.item.id);
+      }
+    },
+    [onItemMount, virtualItem.item.id, virtualItem.measureRef]
+  );
+
+  return (
+    <div key={virtualItem.key} ref={ref} style={virtualItem.style}>
+      <span
+        data-height={virtualItem.item.height}
+        data-item-key={virtualItem.item.id}
+        data-tick={tick}
+      >
+        {virtualItem.item.id}
+      </span>
     </div>
   );
 }
@@ -319,6 +347,34 @@ describe("React DOM integration", () => {
     await flushReactFrames();
 
     expect(container.scrollTop).toBe(60);
+    await unmountReact(root);
+  });
+
+  it("does not transiently mount prepended top items before anchor correction", async () => {
+    const items = makeItems(10);
+    const estimateSize = () => 20;
+    const mountedKeys: string[] = [];
+    const { root, container } = await mountReact({
+      items,
+      estimateSize,
+      onItemMount: (key) => mountedKeys.push(key)
+    });
+    await scrollReactActive(container, 40);
+    mountedKeys.length = 0;
+
+    await act(async () => {
+      root.render(
+        <ReactHarness
+          items={[{ id: "prepended", height: 20 }, ...items]}
+          estimateSize={estimateSize}
+          onItemMount={(key) => mountedKeys.push(key)}
+        />
+      );
+    });
+    await flushReactFrames();
+
+    expect(container.scrollTop).toBe(60);
+    expect(mountedKeys).not.toContain("prepended");
     await unmountReact(root);
   });
 

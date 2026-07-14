@@ -583,11 +583,64 @@ export function useVirtualList<TItem>(
     measurementVersion.value += 1;
   });
 
+  const renderScrollOffset = computed(() => {
+    if (viewport.value.viewportSize <= 0) {
+      return viewport.value.scrollOffset;
+    }
+
+    const listChanged = previousListIdentity !== listIdentity.value;
+    const previousAnchorRecord = listChanged ? anchorSnapshot : null;
+    const node = containerRef.value;
+    const anchorIsCurrent =
+      previousAnchorRecord?.scrollRevision === scrollRevision &&
+      (!node || !hasActiveTextSelection(node));
+
+    if (!previousAnchorRecord || !anchorIsCurrent) {
+      return viewport.value.scrollOffset;
+    }
+
+    const total = virtualizer.value.getTotalSize();
+    if (bottomIntent) {
+      return Math.max(0, total - viewport.value.viewportSize);
+    }
+
+    const previousAnchor = previousAnchorRecord.snapshot;
+    const shouldPreserveScrollPosition =
+      resolveMaybeRef(options.preserveScrollPosition) ?? true;
+    const shouldStickToBottom = resolveMaybeRef(options.stickToBottom) ?? false;
+
+    if (
+      !shouldPreserveScrollPosition &&
+      !(shouldStickToBottom && previousAnchor.atEnd)
+    ) {
+      return viewport.value.scrollOffset;
+    }
+
+    if (shouldStickToBottom && previousAnchor.atEnd) {
+      return Math.max(0, total - viewport.value.viewportSize);
+    }
+
+    const nextAnchorIndex = resolveAnchorIndex(
+      virtualizer.value,
+      previousAnchor
+    );
+    if (nextAnchorIndex === -1) {
+      return viewport.value.scrollOffset;
+    }
+
+    return clamp(
+      virtualizer.value.getStartForIndex(nextAnchorIndex) -
+        previousAnchor.offset,
+      0,
+      Math.max(0, total - viewport.value.viewportSize)
+    );
+  });
+
   const range = computed(() => {
     updateOptions();
     measurementVersion.value;
     const nextRange = virtualizer.value.getVirtualRange(
-      viewport.value.scrollOffset,
+      renderScrollOffset.value,
       viewport.value.viewportSize
     );
     latestRenderedBounds = getRenderedBounds(nextRange);

@@ -638,15 +638,66 @@ export function useVirtualList<TItem>(
     []
   );
 
+  const renderScrollOffset = useMemo(() => {
+    if (viewport.viewportSize <= 0) {
+      return viewport.scrollOffset;
+    }
+
+    const listChanged = previousListIdentityRef.current !== listIdentity;
+    const previousAnchorRecord = listChanged
+      ? anchorSnapshotRef.current
+      : null;
+    const node = containerRef.current;
+    const anchorIsCurrent =
+      previousAnchorRecord?.scrollRevision === scrollRevisionRef.current &&
+      (!node || !hasActiveTextSelection(node));
+
+    if (!previousAnchorRecord || !anchorIsCurrent) {
+      return viewport.scrollOffset;
+    }
+
+    if (bottomIntentRef.current) {
+      return Math.max(0, virtualizer.getTotalSize() - viewport.viewportSize);
+    }
+
+    const previousAnchor = previousAnchorRecord.snapshot;
+    if (!preserveScrollPosition && !(stickToBottom && previousAnchor.atEnd)) {
+      return viewport.scrollOffset;
+    }
+
+    if (stickToBottom && previousAnchor.atEnd) {
+      return Math.max(0, virtualizer.getTotalSize() - viewport.viewportSize);
+    }
+
+    const nextAnchorIndex = resolveAnchorIndex(virtualizer, previousAnchor);
+    if (nextAnchorIndex === -1) {
+      return viewport.scrollOffset;
+    }
+
+    return clamp(
+      virtualizer.getStartForIndex(nextAnchorIndex) - previousAnchor.offset,
+      0,
+      Math.max(0, virtualizer.getTotalSize() - viewport.viewportSize)
+    );
+  }, [
+    listIdentity,
+    measurementVersion,
+    preserveScrollPosition,
+    stickToBottom,
+    viewport.scrollOffset,
+    viewport.viewportSize,
+    virtualizer
+  ]);
+
   const range = useMemo(
     () =>
       virtualizer.getVirtualRange(
-        viewport.scrollOffset,
+        renderScrollOffset,
         viewport.viewportSize
       ),
     [
       virtualizer,
-      viewport.scrollOffset,
+      renderScrollOffset,
       viewport.viewportSize,
       viewport.dynamicOverscanBeforePx,
       viewport.dynamicOverscanAfterPx,
