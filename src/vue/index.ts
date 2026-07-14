@@ -382,6 +382,7 @@ export function useVirtualList<TItem>(
   let latestRenderedBounds: RenderedBounds | null = null;
   let scrollRevision = 0;
   let isScrolling = false;
+  let internalScrollAdjustment: number | null = null;
   let measureFrame = 0;
   const dirtyMeasurements = new Map<VirtualItemKey, ItemObserverRecord>();
   let previousLayoutIdentity = listIdentity.value;
@@ -470,6 +471,17 @@ export function useVirtualList<TItem>(
     let scrollFrame = 0;
     let scrollTimer = 0;
     const scheduleScrollRead = () => {
+      const nextMetrics = getScrollMetrics(node, axis.value);
+      if (
+        internalScrollAdjustment !== null &&
+        Math.abs(nextMetrics.scrollOffset - internalScrollAdjustment) <= 0.5
+      ) {
+        internalScrollAdjustment = null;
+        readViewport();
+        return;
+      }
+      internalScrollAdjustment = null;
+
       scrollRevision += 1;
       if (!isScrolling) {
         lastScrollSample = null;
@@ -484,7 +496,6 @@ export function useVirtualList<TItem>(
         readViewport();
       }, 120);
 
-      const nextMetrics = getScrollMetrics(node, axis.value);
       if (isOutsideRenderedBounds(nextMetrics, latestRenderedBounds)) {
         if (scrollFrame !== 0) {
           window.cancelAnimationFrame(scrollFrame);
@@ -645,7 +656,6 @@ export function useVirtualList<TItem>(
           const previousAnchor = previousAnchorRecord.snapshot;
           const anchorIsCurrent =
             previousAnchorRecord.scrollRevision === scrollRevision &&
-            !isScrolling &&
             !hasActiveTextSelection(node);
 
           if (bottomIntent) {
@@ -681,6 +691,7 @@ export function useVirtualList<TItem>(
 
         if (Math.abs(metrics.scrollOffset - boundedOffset) > 0.5) {
           scrollRevision += 1;
+          internalScrollAdjustment = boundedOffset;
           setNodeScrollOffset(node, axis.value, boundedOffset, "auto");
         }
       }

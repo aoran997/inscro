@@ -302,6 +302,47 @@ describe("React DOM integration", () => {
     await unmountReact(root);
   });
 
+  it("preserves the visible item when messages are prepended before scrolling settles", async () => {
+    const items = makeItems(10);
+    const estimateSize = () => 20;
+    const { root, container } = await mountReact({ items, estimateSize });
+    await scrollReactActive(container, 40);
+
+    await act(async () => {
+      root.render(
+        <ReactHarness
+          items={[{ id: "prepended", height: 20 }, ...items]}
+          estimateSize={estimateSize}
+        />
+      );
+    });
+    await flushReactFrames();
+
+    expect(container.scrollTop).toBe(60);
+    await unmountReact(root);
+  });
+
+  it("preserves the visible item after a fast prepend with mismatched estimated and measured height", async () => {
+    const items = makeItems(10, 30);
+    const estimateSize = (_index: number, item: TestItem) =>
+      item.id === "prepended" ? 20 : 30;
+    const { root, container } = await mountReact({ items, estimateSize });
+    await scrollReactActive(container, 30);
+
+    await act(async () => {
+      root.render(
+        <ReactHarness
+          items={[{ id: "prepended", height: 50 }, ...items]}
+          estimateSize={estimateSize}
+        />
+      );
+    });
+    await flushReactFrames();
+
+    expect(container.scrollTop).toBe(80);
+    await unmountReact(root);
+  });
+
   it("detects interior key changes even when length and edge keys stay equal", async () => {
     const items = makeItems(5);
     const estimateSize = () => 20;
@@ -433,12 +474,61 @@ describe("Vue DOM integration", () => {
 
     await unmountVue(app);
   });
+
+  it("preserves anchors after fast prepend before scrolling settles", async () => {
+    const items = vueRef(makeItems(10));
+    const estimateSize = () => 20;
+    const appRoot = document.createElement("div");
+    document.body.append(appRoot);
+    const app = createApp(
+      defineComponent({
+        setup() {
+          return () =>
+            h(
+              VueVirtualList,
+              {
+                items: items.value,
+                estimateSize,
+                getItemKey: (item: unknown) => (item as TestItem).id,
+                preserveScrollPosition: true,
+                style: { height: "100px" },
+                "data-vue-list": ""
+              },
+              {
+                default: ({ item }: { item: TestItem }) =>
+                  h(
+                    "span",
+                    {
+                      "data-height": item.height,
+                      "data-item-key": item.id
+                    },
+                    item.id
+                  )
+              }
+            );
+        }
+      })
+    );
+    app.mount(appRoot);
+    await flushVueFrames();
+
+    const container = document.querySelector(
+      "[data-vue-list]"
+    ) as HTMLElement;
+    await scrollVueActive(container, 40);
+    items.value = [{ id: "prepended", height: 20 }, ...items.value];
+    await nextTick();
+    await flushVueFrames();
+
+    expect(container.scrollTop).toBe(60);
+    await unmountVue(app);
+  });
 });
 
-function makeItems(count: number): TestItem[] {
+function makeItems(count: number, height = 20): TestItem[] {
   return Array.from({ length: count }, (_, index) => ({
     id: `item-${index}`,
-    height: 20
+    height
   }));
 }
 
@@ -472,13 +562,20 @@ async function scrollReact(
   container: HTMLElement,
   scrollTop: number
 ): Promise<void> {
+  await scrollReactActive(container, scrollTop);
+  await act(async () => {
+    vi.advanceTimersByTime(121);
+  });
+  await flushReactFrames();
+}
+
+async function scrollReactActive(
+  container: HTMLElement,
+  scrollTop: number
+): Promise<void> {
   await act(async () => {
     container.scrollTop = scrollTop;
     container.dispatchEvent(new Event("scroll"));
-  });
-  await flushReactFrames();
-  await act(async () => {
-    vi.advanceTimersByTime(121);
   });
   await flushReactFrames();
 }
@@ -487,11 +584,18 @@ async function scrollVue(
   container: HTMLElement,
   scrollTop: number
 ): Promise<void> {
-  container.scrollTop = scrollTop;
-  container.dispatchEvent(new Event("scroll"));
-  await flushVueFrames();
+  await scrollVueActive(container, scrollTop);
   vi.advanceTimersByTime(121);
   await nextTick();
+  await flushVueFrames();
+}
+
+async function scrollVueActive(
+  container: HTMLElement,
+  scrollTop: number
+): Promise<void> {
+  container.scrollTop = scrollTop;
+  container.dispatchEvent(new Event("scroll"));
   await flushVueFrames();
 }
 
