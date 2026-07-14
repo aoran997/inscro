@@ -125,4 +125,60 @@ describe("Virtualizer", () => {
 
     expect(range.items.map((item) => item.index)).toEqual([3, 4, 5, 6, 7, 8]);
   });
+
+  it("supports directional pixel overscan", () => {
+    const virtualizer = createVirtualizer({
+      count: 20,
+      estimateSize: 20,
+      overscan: 0,
+      overscanBeforePx: 0,
+      overscanAfterPx: 40
+    });
+
+    expect(
+      virtualizer.getVirtualRange(100, 40).items.map((item) => item.index)
+    ).toEqual([5, 6, 7, 8]);
+
+    virtualizer.updateOptions({
+      count: 20,
+      estimateSize: 20,
+      overscan: 0,
+      overscanBeforePx: 40,
+      overscanAfterPx: 0
+    });
+
+    expect(
+      virtualizer.getVirtualRange(100, 40).items.map((item) => item.index)
+    ).toEqual([3, 4, 5, 6]);
+  });
+
+  it("does not rebuild layout for stable option functions", () => {
+    let estimateCalls = 0;
+    const estimateSize = () => {
+      estimateCalls += 1;
+      return 20;
+    };
+    const getItemKey = (index: number) => `item-${index}`;
+    const virtualizer = createVirtualizer({
+      count: 5,
+      estimateSize,
+      getItemKey
+    });
+
+    virtualizer.getVirtualRange(0, 40);
+    expect(estimateCalls).toBe(5);
+
+    virtualizer.updateOptions({
+      count: 5,
+      estimateSize,
+      getItemKey,
+      overscan: 4
+    });
+    virtualizer.getVirtualRange(20, 40);
+    expect(estimateCalls).toBe(5);
+
+    virtualizer.invalidateLayout();
+    virtualizer.getVirtualRange(20, 40);
+    expect(estimateCalls).toBe(10);
+  });
 });

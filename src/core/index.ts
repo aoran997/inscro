@@ -7,6 +7,10 @@ export interface VirtualizerOptions<TKey extends VirtualItemKey = number> {
   estimateSize: EstimateSize;
   overscan?: number;
   overscanPx?: number;
+  /** Pixel overscan before the viewport. Defaults to overscanPx. */
+  overscanBeforePx?: number;
+  /** Pixel overscan after the viewport. Defaults to overscanPx. */
+  overscanAfterPx?: number;
   gap?: number;
   getItemKey?: (index: number) => TKey;
 }
@@ -120,6 +124,10 @@ export class Virtualizer<TKey extends VirtualItemKey = number> {
     }
   }
 
+  invalidateLayout(): void {
+    this.layoutDirty = true;
+  }
+
   getTotalSize(): number {
     this.ensureLayout();
     return this.totalSize;
@@ -214,10 +222,10 @@ export class Virtualizer<TKey extends VirtualItemKey = number> {
     const safeOffset = clamp(scrollOffset, 0, Math.max(0, this.totalSize));
     const safeViewportSize = Math.max(0, viewportSize);
     const visibleStart = this.findFirstVisibleIndex(
-      Math.max(0, safeOffset - this.options.overscanPx)
+      Math.max(0, safeOffset - this.options.overscanBeforePx)
     );
     const visibleEnd = this.findLastVisibleIndex(
-      safeOffset + safeViewportSize + this.options.overscanPx
+      safeOffset + safeViewportSize + this.options.overscanAfterPx
     );
     const startIndex = clamp(visibleStart - this.options.overscan, 0, count - 1);
     const endIndex = clamp(visibleEnd + this.options.overscan, startIndex, count - 1);
@@ -355,6 +363,14 @@ function normalizeOptions<TKey extends VirtualItemKey>(
     estimateSize: options.estimateSize,
     overscan: Math.max(0, Math.floor(options.overscan ?? DEFAULT_OVERSCAN)),
     overscanPx: Math.max(0, options.overscanPx ?? 0),
+    overscanBeforePx: Math.max(
+      0,
+      options.overscanBeforePx ?? options.overscanPx ?? 0
+    ),
+    overscanAfterPx: Math.max(
+      0,
+      options.overscanAfterPx ?? options.overscanPx ?? 0
+    ),
     gap: Math.max(0, options.gap ?? 0),
     getItemKey: options.getItemKey
   };

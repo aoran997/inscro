@@ -24,7 +24,6 @@ type Axis = "vertical" | "horizontal";
 
 interface ItemObserverRecord {
   node: HTMLElement;
-  index: number;
   observer?: ResizeObserver;
   cleanupImages?: () => void;
 }
@@ -38,6 +37,21 @@ interface ScrollSample {
 interface ReachRecord {
   edgeKey: VirtualItemKey;
   callback?: () => void;
+}
+
+interface RevisionedAnchorSnapshot {
+  snapshot: ScrollAnchorSnapshot;
+  scrollRevision: number;
+}
+
+interface DynamicOverscan {
+  before: number;
+  after: number;
+}
+
+interface RenderedBounds {
+  start: number;
+  end: number;
 }
 
 export interface ResetVirtualListOptions {
@@ -177,97 +191,176 @@ export function useVirtualList<TItem>(
     defaultGetItemKeyRef.current = createDefaultGetItemKey<TItem>();
   }
   const resolvedGetItemKey = getItemKey ?? defaultGetItemKeyRef.current;
-  const firstItemKey =
-    items.length > 0
-      ? resolvedGetItemKey(items[0] as TItem, 0)
-      : "__empty__";
-  const lastItemKey =
-    items.length > 0
-      ? resolvedGetItemKey(items[items.length - 1] as TItem, items.length - 1)
-      : "__empty__";
-  const listIdentity = `${items.length}:${String(firstItemKey)}:${String(lastItemKey)}`;
+  const itemKeys = useMemo(
+    () => items.map((item, index) => resolvedGetItemKey(item, index)),
+    [items, resolvedGetItemKey]
+  );
+  const estimateSignature = useMemo<readonly number[] | number>(
+    () =>
+      typeof estimateSize === "number"
+        ? estimateSize
+        : items.map((item, index) => estimateSize(index, item)),
+    [estimateSize, items]
+  );
+  const listIdentityRef = useRef({ keys: itemKeys, revision: 0 });
+  if (!areKeySequencesEqual(listIdentityRef.current.keys, itemKeys)) {
+    listIdentityRef.current = {
+      keys: itemKeys,
+      revision: listIdentityRef.current.revision + 1
+    };
+  }
+  const listIdentity = listIdentityRef.current.revision;
+  const firstItemKey = itemKeys[0] ?? "__empty__";
+  const lastItemKey = itemKeys[itemKeys.length - 1] ?? "__empty__";
   const containerRef = useRef<HTMLDivElement>(null);
   const [measurementVersion, setMeasurementVersion] = useState(0);
   const [viewport, setViewport] = useState({
     scrollOffset: 0,
     viewportSize: 0,
-    dynamicOverscanPx: 0
+    dynamicOverscanBeforePx: 0,
+    dynamicOverscanAfterPx: 0
   });
   const virtualizerRef = useRef<Virtualizer<VirtualItemKey>>();
   const itemObserversRef = useRef(new Map<VirtualItemKey, ItemObserverRecord>());
-  const anchorSnapshotRef = useRef<ScrollAnchorSnapshot | null>(null);
+  const itemIndicesRef = useRef(new Map<VirtualItemKey, number>());
+  const measureCallbacksRef = useRef(
+    new Map<VirtualItemKey, (node: HTMLElement | null) => void>()
+  );
+  const anchorSnapshotRef = useRef<RevisionedAnchorSnapshot | null>(null);
   const pendingMeasureAnchorSnapshotRef =
-    useRef<ScrollAnchorSnapshot | null>(null);
+    useRef<RevisionedAnchorSnapshot | null>(null);
   const previousListIdentityRef = useRef(listIdentity);
   const initialScrollDoneRef = useRef(false);
   const bottomIntentRef = useRef(false);
   const lastReachStartRef = useRef<ReachRecord | null>(null);
   const lastReachEndRef = useRef<ReachRecord | null>(null);
   const lastScrollSampleRef = useRef<ScrollSample | null>(null);
-  const latestTotalSizeRef = useRef(0);
+  const latestRenderedBoundsRef = useRef<RenderedBounds | null>(null);
+  const scrollRevisionRef = useRef(0);
+  const isScrollingRef = useRef(false);
   const measureFrameRef = useRef(0);
   const dirtyMeasurementsRef = useRef(
     new Map<VirtualItemKey, ItemObserverRecord>()
   );
 
+  const latestOptionsRef = useRef({
+    items,
+    estimateSignature,
+    getItemKey: resolvedGetItemKey,
+    axis,
+    edgeThreshold,
+    bottomThreshold
+  });
+  latestOptionsRef.current = {
+    items,
+    estimateSignature,
+    getItemKey: resolvedGetItemKey,
+    axis,
+    edgeThreshold,
+    bottomThreshold
+  };
+
+  const coreEstimateSizeRef = useRef<EstimateSize>();
+  if (!coreEstimateSizeRef.current) {
+    coreEstimateSizeRef.current = (index) => {
+      const latest = latestOptionsRef.current;
+      return typeof latest.estimateSignature === "number"
+        ? latest.estimateSignature
+        : latest.estimateSignature[index] ?? 0;
+    };
+  }
+
+  const coreGetItemKeyRef = useRef<(index: number) => VirtualItemKey>();
+  if (!coreGetItemKeyRef.current) {
+    coreGetItemKeyRef.current = (index) => {
+      const latest = latestOptionsRef.current;
+      return latest.getItemKey(latest.items[index] as TItem, index);
+    };
+  }
+
+  const previousLayoutInputsRef = useRef<{
+    estimateSignature: readonly number[] | number;
+    listIdentity: number;
+  }>();
+  const previousLayoutInputs = previousLayoutInputsRef.current;
+  const shouldInvalidateLayout = Boolean(
+    previousLayoutInputs &&
+      (previousLayoutInputs.listIdentity !== listIdentity ||
+        !areEstimateSignaturesEqual(
+          previousLayoutInputs.estimateSignature,
+          estimateSignature
+        ))
+  );
+  previousLayoutInputsRef.current = {
+    estimateSignature,
+    listIdentity
+  };
+
   if (!virtualizerRef.current) {
     virtualizerRef.current = new Virtualizer<VirtualItemKey>({
       count: items.length,
-      estimateSize: createEstimateSize(estimateSize, items),
+      estimateSize: coreEstimateSizeRef.current,
       overscan,
       overscanPx,
       gap,
-      getItemKey: createGetItemKey(resolvedGetItemKey, items)
+      getItemKey: coreGetItemKeyRef.current
     });
   }
 
   const virtualizer = virtualizerRef.current;
+  if (shouldInvalidateLayout) {
+    virtualizer.invalidateLayout();
+  }
+  const baseOverscanPx = Math.max(0, overscanPx ?? 0);
   virtualizer.updateOptions({
     count: items.length,
-    estimateSize: createEstimateSize(estimateSize, items),
+    estimateSize: coreEstimateSizeRef.current,
     overscan,
-    overscanPx: Math.max(0, overscanPx ?? 0) + viewport.dynamicOverscanPx,
+    overscanPx: baseOverscanPx,
+    overscanBeforePx:
+      baseOverscanPx + viewport.dynamicOverscanBeforePx,
+    overscanAfterPx: baseOverscanPx + viewport.dynamicOverscanAfterPx,
     gap,
-    getItemKey: createGetItemKey(resolvedGetItemKey, items)
+    getItemKey: coreGetItemKeyRef.current
   });
 
-  const readViewport = useCallback((source: "scroll" | "layout" = "layout") => {
-    const node = containerRef.current;
-    if (!node) {
-      return;
-    }
+  const readViewport = useCallback(
+    (source: "scroll" | "layout" = "layout") => {
+      const node = containerRef.current;
+      if (!node) {
+        return;
+      }
 
-    const nextViewport = getScrollMetrics(node, axis);
-    const dynamicOverscanPx =
-      source === "scroll"
-        ? getDynamicOverscanPx(
-            lastScrollSampleRef.current,
-            nextViewport,
-            typeof performance === "undefined" ? Date.now() : performance.now()
-          )
-        : 0;
-    lastScrollSampleRef.current = {
-      ...nextViewport,
-      timestamp:
-        typeof performance === "undefined" ? Date.now() : performance.now()
-    };
+      const nextViewport = getScrollMetrics(node, axis);
+      const timestamp = now();
+      const dynamicOverscan =
+        source === "scroll"
+          ? getDynamicOverscan(
+              lastScrollSampleRef.current,
+              nextViewport,
+              timestamp
+            )
+          : EMPTY_DYNAMIC_OVERSCAN;
 
-    if (
-      source === "scroll" &&
-      bottomIntentRef.current &&
-      !isAtEnd(nextViewport, latestTotalSizeRef.current, bottomThreshold)
-    ) {
-      bottomIntentRef.current = false;
-    }
+      if (source === "scroll") {
+        lastScrollSampleRef.current = { ...nextViewport, timestamp };
+      }
 
-    setViewport((previous) =>
-      previous.scrollOffset === nextViewport.scrollOffset &&
-      previous.viewportSize === nextViewport.viewportSize &&
-      previous.dynamicOverscanPx === dynamicOverscanPx
-        ? previous
-        : { ...nextViewport, dynamicOverscanPx }
-    );
-  }, [axis, bottomThreshold]);
+      setViewport((previous) =>
+        previous.scrollOffset === nextViewport.scrollOffset &&
+        previous.viewportSize === nextViewport.viewportSize &&
+        previous.dynamicOverscanBeforePx === dynamicOverscan.before &&
+        previous.dynamicOverscanAfterPx === dynamicOverscan.after
+          ? previous
+          : {
+              ...nextViewport,
+              dynamicOverscanBeforePx: dynamicOverscan.before,
+              dynamicOverscanAfterPx: dynamicOverscan.after
+            }
+      );
+    },
+    [axis]
+  );
 
   useIsomorphicLayoutEffect(() => {
     const node = containerRef.current;
@@ -293,11 +386,31 @@ export function useVirtualList<TItem>(
     };
 
     const scheduleScrollRead = () => {
+      scrollRevisionRef.current += 1;
+      if (!isScrollingRef.current) {
+        lastScrollSampleRef.current = null;
+      }
+      isScrollingRef.current = true;
       node.classList.add("is-scrolling", "inscro-is-scrolling");
       window.clearTimeout(scrollTimer);
       scrollTimer = window.setTimeout(() => {
+        isScrollingRef.current = false;
+        lastScrollSampleRef.current = null;
         node.classList.remove("is-scrolling", "inscro-is-scrolling");
+        readViewport();
       }, 120);
+
+      const nextMetrics = getScrollMetrics(node, axis);
+      if (
+        isOutsideRenderedBounds(nextMetrics, latestRenderedBoundsRef.current)
+      ) {
+        if (scrollFrame !== 0) {
+          window.cancelAnimationFrame(scrollFrame);
+          scrollFrame = 0;
+        }
+        readViewport("scroll");
+        return;
+      }
 
       if (scrollFrame !== 0) {
         return;
@@ -309,7 +422,27 @@ export function useVirtualList<TItem>(
       });
     };
 
+    const cancelBottomIntent = () => {
+      bottomIntentRef.current = false;
+      scrollRevisionRef.current += 1;
+      if (anchorSnapshotRef.current) {
+        anchorSnapshotRef.current = {
+          ...anchorSnapshotRef.current,
+          scrollRevision: scrollRevisionRef.current
+        };
+      }
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (isScrollIntentKey(event)) {
+        cancelBottomIntent();
+      }
+    };
+
     node.addEventListener("scroll", scheduleScrollRead, { passive: true });
+    node.addEventListener("wheel", cancelBottomIntent, { passive: true });
+    node.addEventListener("touchstart", cancelBottomIntent, { passive: true });
+    node.addEventListener("pointerdown", cancelBottomIntent, { passive: true });
+    node.addEventListener("keydown", handleKeyDown);
 
     let resizeObserver: ResizeObserver | undefined;
     if (typeof ResizeObserver !== "undefined") {
@@ -329,8 +462,13 @@ export function useVirtualList<TItem>(
       }
 
       window.clearTimeout(scrollTimer);
+      isScrollingRef.current = false;
       node.classList.remove("is-scrolling", "inscro-is-scrolling");
       node.removeEventListener("scroll", scheduleScrollRead);
+      node.removeEventListener("wheel", cancelBottomIntent);
+      node.removeEventListener("touchstart", cancelBottomIntent);
+      node.removeEventListener("pointerdown", cancelBottomIntent);
+      node.removeEventListener("keydown", handleKeyDown);
       resizeObserver?.disconnect();
 
       if (typeof ResizeObserver === "undefined") {
@@ -339,12 +477,87 @@ export function useVirtualList<TItem>(
     };
   }, [readViewport]);
 
-  const measureRef = useCallback(
-    (index: number, key: VirtualItemKey) => (node: HTMLElement | null) => {
+  const flushMeasurements = useCallback(() => {
+    const itemObservers = itemObserversRef.current;
+    const latest = latestOptionsRef.current;
+    const containerNode = containerRef.current;
+    const metrics = containerNode
+      ? getScrollMetrics(containerNode, latest.axis)
+      : null;
+    const snapshot =
+      containerNode && metrics
+        ? createAnchorSnapshot(
+            virtualizer,
+            metrics,
+            latest.edgeThreshold,
+            latest.bottomThreshold
+          )
+        : null;
+    const previousAnchor = snapshot
+      ? {
+          snapshot,
+          scrollRevision: scrollRevisionRef.current
+        }
+      : null;
+
+    let changed = false;
+    for (const [dirtyKey, dirtyRecord] of dirtyMeasurementsRef.current) {
+      if (itemObservers.get(dirtyKey) !== dirtyRecord) {
+        continue;
+      }
+
+      const index = itemIndicesRef.current.get(dirtyKey);
+      if (index === undefined) {
+        continue;
+      }
+
+      const rect = dirtyRecord.node.getBoundingClientRect();
+      const size = latest.axis === "horizontal" ? rect.width : rect.height;
+      changed = virtualizer.measure(index, size) || changed;
+    }
+
+    dirtyMeasurementsRef.current.clear();
+
+    if (changed) {
+      const pending = pendingMeasureAnchorSnapshotRef.current;
+      if (
+        previousAnchor &&
+        (!pending ||
+          pending.scrollRevision !== previousAnchor.scrollRevision)
+      ) {
+        pendingMeasureAnchorSnapshotRef.current = previousAnchor;
+      }
+      setMeasurementVersion((value) => value + 1);
+    }
+  }, [virtualizer]);
+
+  const queueMeasurement = useCallback(
+    (key: VirtualItemKey, record: ItemObserverRecord) => {
+      dirtyMeasurementsRef.current.set(key, record);
+
+      if (typeof window === "undefined") {
+        flushMeasurements();
+        return;
+      }
+
+      if (measureFrameRef.current !== 0) {
+        return;
+      }
+
+      measureFrameRef.current = window.requestAnimationFrame(() => {
+        measureFrameRef.current = 0;
+        flushMeasurements();
+      });
+    },
+    [flushMeasurements]
+  );
+
+  const attachItemNode = useCallback(
+    (key: VirtualItemKey, node: HTMLElement | null) => {
       const itemObservers = itemObserversRef.current;
       const previousRecord = itemObservers.get(key);
 
-      if (previousRecord?.node === node && previousRecord.index === index) {
+      if (previousRecord?.node === node) {
         return;
       }
 
@@ -357,65 +570,8 @@ export function useVirtualList<TItem>(
         return;
       }
 
-      const record: ItemObserverRecord = { node, index };
-
-      const measureNow = () => {
-        dirtyMeasurementsRef.current.set(key, record);
-        flushMeasurements();
-      };
-
-      const flushMeasurements = () => {
-        const containerNode = containerRef.current;
-        const metrics = containerNode
-          ? getScrollMetrics(containerNode, axis)
-          : null;
-        const previousAnchor =
-          containerNode && metrics
-            ? createAnchorSnapshot(
-                virtualizer,
-                metrics,
-                edgeThreshold,
-                bottomThreshold
-              )
-            : null;
-
-        let changed = false;
-        for (const [dirtyKey, dirtyRecord] of dirtyMeasurementsRef.current) {
-          if (itemObservers.get(dirtyKey) !== dirtyRecord) {
-            continue;
-          }
-
-          const rect = dirtyRecord.node.getBoundingClientRect();
-          const size = axis === "horizontal" ? rect.width : rect.height;
-          changed = virtualizer.measure(dirtyRecord.index, size) || changed;
-        }
-
-        dirtyMeasurementsRef.current.clear();
-
-        if (changed) {
-          pendingMeasureAnchorSnapshotRef.current ??= previousAnchor;
-          setMeasurementVersion((value) => value + 1);
-        }
-      };
-
-      const scheduleMeasure = () => {
-        if (typeof window === "undefined") {
-          measureNow();
-          return;
-        }
-
-        dirtyMeasurementsRef.current.set(key, record);
-
-        if (measureFrameRef.current !== 0) {
-          return;
-        }
-
-        measureFrameRef.current = window.requestAnimationFrame(() => {
-          measureFrameRef.current = 0;
-          flushMeasurements();
-        });
-      };
-
+      const record: ItemObserverRecord = { node };
+      const scheduleMeasure = () => queueMeasurement(key, record);
       itemObservers.set(key, record);
       scheduleMeasure();
 
@@ -426,8 +582,31 @@ export function useVirtualList<TItem>(
 
       record.cleanupImages = observeImageLoads(node, scheduleMeasure);
     },
-    [axis, bottomThreshold, edgeThreshold, virtualizer]
+    [queueMeasurement]
   );
+
+  const attachItemNodeRef = useRef(attachItemNode);
+  attachItemNodeRef.current = attachItemNode;
+
+  const measureRef = useCallback((index: number, key: VirtualItemKey) => {
+    itemIndicesRef.current.set(key, index);
+    let callback = measureCallbacksRef.current.get(key);
+    if (!callback) {
+      callback = (node) => attachItemNodeRef.current(key, node);
+      measureCallbacksRef.current.set(key, callback);
+    }
+    return callback;
+  }, []);
+
+  useIsomorphicLayoutEffect(() => {
+    const activeKeys = new Set(itemKeys);
+    for (const key of measureCallbacksRef.current.keys()) {
+      if (!activeKeys.has(key)) {
+        measureCallbacksRef.current.delete(key);
+        itemIndicesRef.current.delete(key);
+      }
+    }
+  }, [itemKeys]);
 
   useIsomorphicLayoutEffect(
     () => () => {
@@ -436,6 +615,8 @@ export function useVirtualList<TItem>(
       }
 
       itemObserversRef.current.clear();
+      itemIndicesRef.current.clear();
+      measureCallbacksRef.current.clear();
       dirtyMeasurementsRef.current.clear();
       if (measureFrameRef.current !== 0 && typeof window !== "undefined") {
         window.cancelAnimationFrame(measureFrameRef.current);
@@ -455,7 +636,8 @@ export function useVirtualList<TItem>(
       virtualizer,
       viewport.scrollOffset,
       viewport.viewportSize,
-      viewport.dynamicOverscanPx,
+      viewport.dynamicOverscanBeforePx,
+      viewport.dynamicOverscanAfterPx,
       measurementVersion,
       items,
       estimateSize,
@@ -478,7 +660,7 @@ export function useVirtualList<TItem>(
   );
 
   const totalSize = range.totalSize;
-  latestTotalSizeRef.current = totalSize;
+  latestRenderedBoundsRef.current = getRenderedBounds(range);
   const innerStyle = useMemo(
     () => getInnerStyle(axis, totalSize),
     [axis, totalSize]
@@ -507,19 +689,23 @@ export function useVirtualList<TItem>(
       bottomIntentRef.current = true;
     } else {
       const listChanged = previousListIdentityRef.current !== listIdentity;
-      const previousAnchor = listChanged
+      const previousAnchorRecord = listChanged
         ? anchorSnapshotRef.current
         : pendingMeasureAnchorSnapshotRef.current ?? anchorSnapshotRef.current;
       pendingMeasureAnchorSnapshotRef.current = null;
-      previousListIdentityRef.current = listIdentity;
 
-      if (previousAnchor) {
-        if (
-          bottomIntentRef.current ||
-          (stickToBottom && previousAnchor.atEnd)
-        ) {
+      if (previousAnchorRecord) {
+        const previousAnchor = previousAnchorRecord.snapshot;
+        const anchorIsCurrent =
+          previousAnchorRecord.scrollRevision === scrollRevisionRef.current &&
+          !isScrollingRef.current &&
+          !hasActiveTextSelection(node);
+
+        if (bottomIntentRef.current) {
           nextOffset = Math.max(0, totalSize - metrics.viewportSize);
-        } else if (preserveScrollPosition) {
+        } else if (anchorIsCurrent && stickToBottom && previousAnchor.atEnd) {
+          nextOffset = Math.max(0, totalSize - metrics.viewportSize);
+        } else if (anchorIsCurrent && preserveScrollPosition) {
           const nextAnchorIndex = resolveAnchorIndex(
             virtualizer,
             previousAnchor
@@ -533,6 +719,7 @@ export function useVirtualList<TItem>(
         }
       }
     }
+    previousListIdentityRef.current = listIdentity;
 
     if (nextOffset !== undefined) {
       const boundedOffset = clamp(
@@ -542,6 +729,7 @@ export function useVirtualList<TItem>(
       );
 
       if (Math.abs(metrics.scrollOffset - boundedOffset) > 0.5) {
+        scrollRevisionRef.current += 1;
         setNodeScrollOffset(node, axis, boundedOffset, "auto");
       }
     }
@@ -550,16 +738,27 @@ export function useVirtualList<TItem>(
     setViewport((previous) =>
       previous.scrollOffset === nextMetrics.scrollOffset &&
       previous.viewportSize === nextMetrics.viewportSize &&
-      previous.dynamicOverscanPx === 0
+      previous.dynamicOverscanBeforePx === 0 &&
+      previous.dynamicOverscanAfterPx === 0
         ? previous
-        : { ...nextMetrics, dynamicOverscanPx: 0 }
+        : {
+            ...nextMetrics,
+            dynamicOverscanBeforePx: 0,
+            dynamicOverscanAfterPx: 0
+          }
     );
-    anchorSnapshotRef.current = createAnchorSnapshot(
+    const nextAnchor = createAnchorSnapshot(
       virtualizer,
       nextMetrics,
       edgeThreshold,
       bottomThreshold
     );
+    anchorSnapshotRef.current = nextAnchor
+      ? {
+          snapshot: nextAnchor,
+          scrollRevision: scrollRevisionRef.current
+        }
+      : null;
   }, [
     axis,
     totalSize,
@@ -593,12 +792,18 @@ export function useVirtualList<TItem>(
       return;
     }
 
-    anchorSnapshotRef.current = createAnchorSnapshot(
+    const nextAnchor = createAnchorSnapshot(
       virtualizer,
       getScrollMetrics(node, axis),
       edgeThreshold,
       bottomThreshold
     );
+    anchorSnapshotRef.current = nextAnchor
+      ? {
+          snapshot: nextAnchor,
+          scrollRevision: scrollRevisionRef.current
+        }
+      : null;
   }, [
     axis,
     edgeThreshold,
@@ -663,17 +868,37 @@ export function useVirtualList<TItem>(
     onReachEnd
   ]);
 
-  const scrollToOffset = useCallback(
-    (offset: number, behavior: ScrollBehavior = "auto") => {
+  const applyScrollOffset = useCallback(
+    (
+      offset: number,
+      behavior: ScrollBehavior,
+      preserveBottomIntent: boolean
+    ) => {
       const node = containerRef.current;
       if (!node) {
         return;
       }
 
+      if (!preserveBottomIntent) {
+        bottomIntentRef.current = false;
+      }
+      scrollRevisionRef.current += 1;
+      pendingMeasureAnchorSnapshotRef.current = null;
       setNodeScrollOffset(node, axis, offset, behavior);
-      setViewport({ ...getScrollMetrics(node, axis), dynamicOverscanPx: 0 });
+      setViewport({
+        ...getScrollMetrics(node, axis),
+        dynamicOverscanBeforePx: 0,
+        dynamicOverscanAfterPx: 0
+      });
     },
     [axis]
+  );
+
+  const scrollToOffset = useCallback(
+    (offset: number, behavior: ScrollBehavior = "auto") => {
+      applyScrollOffset(offset, behavior, false);
+    },
+    [applyScrollOffset]
   );
 
   const scrollToIndex = useCallback(
@@ -740,9 +965,14 @@ export function useVirtualList<TItem>(
       }
 
       const metrics = getScrollMetrics(node, axis);
-      scrollToOffset(Math.max(0, totalSize - metrics.viewportSize), behavior);
+      bottomIntentRef.current = true;
+      applyScrollOffset(
+        Math.max(0, totalSize - metrics.viewportSize),
+        behavior,
+        true
+      );
     },
-    [axis, scrollToOffset, totalSize]
+    [applyScrollOffset, axis, totalSize]
   );
 
   const reset = useCallback(
@@ -838,24 +1068,6 @@ export function VirtualList<TItem>(props: VirtualListProps<TItem>) {
   );
 }
 
-function createEstimateSize<TItem>(
-  estimateSize: ReactEstimateSize<TItem>,
-  items: readonly TItem[]
-): EstimateSize {
-  if (typeof estimateSize === "number") {
-    return estimateSize;
-  }
-
-  return (index) => estimateSize(index, items[index] as TItem);
-}
-
-function createGetItemKey<TItem>(
-  getItemKey: (item: TItem, index: number) => VirtualItemKey,
-  items: readonly TItem[]
-) {
-  return (index: number) => getItemKey(items[index] as TItem, index);
-}
-
 function createDefaultGetItemKey<TItem>() {
   const objectKeys = new WeakMap<object, VirtualItemKey>();
   let nextObjectKey = 0;
@@ -930,35 +1142,51 @@ function getScrollMetrics(node: HTMLElement, axis: Axis) {
   };
 }
 
-function getDynamicOverscanPx(
+const EMPTY_DYNAMIC_OVERSCAN: DynamicOverscan = { before: 0, after: 0 };
+
+function getDynamicOverscan(
   previous: ScrollSample | null,
   next: { scrollOffset: number; viewportSize: number },
   timestamp: number
-): number {
+): DynamicOverscan {
   if (!previous || next.viewportSize <= 0) {
-    return 0;
+    return EMPTY_DYNAMIC_OVERSCAN;
   }
 
-  const delta = Math.abs(next.scrollOffset - previous.scrollOffset);
+  const delta = next.scrollOffset - previous.scrollOffset;
   const elapsed = Math.max(1, timestamp - previous.timestamp);
-  const pixelsPerFrame = (delta / elapsed) * 16;
+  const pixelsPerFrame = (Math.abs(delta) / elapsed) * 16;
 
   if (pixelsPerFrame < next.viewportSize * 0.25) {
-    return 0;
+    return EMPTY_DYNAMIC_OVERSCAN;
   }
 
-  return Math.min(next.viewportSize * 3, delta * 2);
+  const forwardBuffer = Math.min(
+    next.viewportSize * 3,
+    Math.abs(delta) * 2
+  );
+  return delta < 0
+    ? { before: forwardBuffer, after: 0 }
+    : { before: 0, after: forwardBuffer };
 }
 
-function isAtEnd(
+function isOutsideRenderedBounds(
   metrics: { scrollOffset: number; viewportSize: number },
-  totalSize: number,
-  threshold: number
+  bounds: RenderedBounds | null
 ): boolean {
-  return (
-    metrics.scrollOffset + metrics.viewportSize >=
-    totalSize - Math.max(0, threshold)
+  return Boolean(
+    !bounds ||
+      metrics.scrollOffset < bounds.start ||
+      metrics.scrollOffset + metrics.viewportSize > bounds.end
   );
+}
+
+function getRenderedBounds(
+  range: VirtualRange<VirtualItemKey>
+): RenderedBounds | null {
+  const first = range.items[0];
+  const last = range.items[range.items.length - 1];
+  return first && last ? { start: first.start, end: last.end } : null;
 }
 
 function shouldCallReach(
@@ -966,7 +1194,68 @@ function shouldCallReach(
   edgeKey: VirtualItemKey,
   callback?: () => void
 ): boolean {
-  return Boolean(callback && !previous);
+  return Boolean(
+    callback &&
+      (!previous ||
+        previous.edgeKey !== edgeKey ||
+        previous.callback !== callback)
+  );
+}
+
+function areKeySequencesEqual(
+  previous: readonly VirtualItemKey[],
+  next: readonly VirtualItemKey[]
+): boolean {
+  return (
+    previous.length === next.length &&
+    previous.every((key, index) => key === next[index])
+  );
+}
+
+function areEstimateSignaturesEqual(
+  previous: readonly number[] | number,
+  next: readonly number[] | number
+): boolean {
+  if (typeof previous === "number" || typeof next === "number") {
+    return previous === next;
+  }
+
+  return (
+    previous.length === next.length &&
+    previous.every((size, index) => Object.is(size, next[index]))
+  );
+}
+
+function isScrollIntentKey(event: KeyboardEvent): boolean {
+  return [
+    "ArrowUp",
+    "ArrowDown",
+    "ArrowLeft",
+    "ArrowRight",
+    "PageUp",
+    "PageDown",
+    "Home",
+    "End",
+    " "
+  ].includes(event.key);
+}
+
+function hasActiveTextSelection(node: HTMLElement): boolean {
+  if (typeof window === "undefined" || !window.getSelection) {
+    return false;
+  }
+
+  const selection = window.getSelection();
+  if (!selection || selection.isCollapsed || selection.rangeCount === 0) {
+    return false;
+  }
+
+  const range = selection.getRangeAt(0);
+  return node.contains(range.commonAncestorContainer);
+}
+
+function now(): number {
+  return typeof performance === "undefined" ? Date.now() : performance.now();
 }
 
 function setNodeScrollOffset(

@@ -24,8 +24,7 @@ import type {
   ScrollToIndexOptions,
   VirtualItem,
   VirtualItemKey,
-  VirtualRange,
-  VirtualizerOptions
+  VirtualRange
 } from "../core";
 import {
   resolveAnchorIndex,
@@ -36,7 +35,6 @@ type Axis = "vertical" | "horizontal";
 
 interface ItemObserverRecord {
   node: HTMLElement;
-  index: number;
   observer?: ResizeObserver;
   cleanupImages?: () => void;
 }
@@ -50,6 +48,21 @@ interface ScrollSample {
 interface ReachRecord {
   edgeKey: VirtualItemKey;
   callback?: () => void;
+}
+
+interface RevisionedAnchorSnapshot {
+  snapshot: ScrollAnchorSnapshot;
+  scrollRevision: number;
+}
+
+interface DynamicOverscan {
+  before: number;
+  after: number;
+}
+
+interface RenderedBounds {
+  start: number;
+  end: number;
 }
 
 export interface ResetVirtualListOptions {
@@ -216,9 +229,37 @@ export const VirtualList = defineComponent({
     const axis = computed<Axis>(() =>
       props.horizontal ? "horizontal" : "vertical"
     );
+    const itemIndices = new Map<VirtualItemKey, number>();
+    const itemRefCallbacks = new Map<
+      VirtualItemKey,
+      (element: Element | ComponentPublicInstance | null) => void
+    >();
+    const getItemRef = (index: number, key: VirtualItemKey) => {
+      itemIndices.set(key, index);
+      let callback = itemRefCallbacks.get(key);
+      if (!callback) {
+        callback = (element) =>
+          virtualList.measureElement(
+            itemIndices.get(key) ?? index,
+            element,
+            key
+          );
+        itemRefCallbacks.set(key, callback);
+      }
+      return callback;
+    };
 
-    return () =>
-      h(
+    return () => {
+      const renderedItems = virtualList.virtualItems.value;
+      const renderedKeys = new Set(renderedItems.map((item) => item.key));
+      for (const key of itemRefCallbacks.keys()) {
+        if (!renderedKeys.has(key)) {
+          itemRefCallbacks.delete(key);
+          itemIndices.delete(key);
+        }
+      }
+
+      return h(
         "div",
         {
           ...attrs,
@@ -234,7 +275,7 @@ export const VirtualList = defineComponent({
               class: props.innerClass,
               style: [virtualList.innerStyle.value, props.innerStyle]
             },
-            virtualList.virtualItems.value.map((virtualItem) => {
+            renderedItems.map((virtualItem) => {
               const context = {
                 item: virtualItem.item,
                 index: virtualItem.index,
@@ -255,12 +296,7 @@ export const VirtualList = defineComponent({
                 "div",
                 {
                   key: virtualItem.key,
-                  ref: (element) =>
-                    virtualList.measureElement(
-                      virtualItem.index,
-                      element,
-                      virtualItem.key
-                    ),
+                  ref: getItemRef(virtualItem.index, virtualItem.key),
                   class: classValue,
                   role: props.role === "list" ? "listitem" : undefined,
                   style: [virtualItem.style, styleValue]
@@ -273,6 +309,7 @@ export const VirtualList = defineComponent({
           )
         ]
       );
+    };
   }
 });
 
@@ -283,52 +320,100 @@ export function useVirtualList<TItem>(
   const viewport = ref({
     scrollOffset: 0,
     viewportSize: 0,
-    dynamicOverscanPx: 0
+    dynamicOverscanBeforePx: 0,
+    dynamicOverscanAfterPx: 0
   });
   const measurementVersion = ref(0);
   const axis = computed<Axis>(() =>
     resolveMaybeRef(options.horizontal) ? "horizontal" : "vertical"
   );
   const defaultGetItemKey = createDefaultGetItemKey<TItem>();
-  const virtualizer = shallowRef(
-    new Virtualizer<VirtualItemKey>(
-      createVirtualizerOptions(options, defaultGetItemKey)
-    )
-  );
-  const listIdentity = computed(() => {
+  const itemKeys = computed(() => {
     const items = unref(options.items);
     const getItemKey =
       resolveMaybeRef(options.getItemKey) ?? defaultGetItemKey;
-    const firstKey =
-      items.length > 0 ? getItemKey(items[0] as TItem, 0) : "__empty__";
-    const lastKey =
-      items.length > 0
-        ? getItemKey(items[items.length - 1] as TItem, items.length - 1)
-        : "__empty__";
-
-    return `${items.length}:${String(firstKey)}:${String(lastKey)}`;
+    return items.map((item, index) => getItemKey(item, index));
   });
+  let previousKeySequence = itemKeys.value;
+  let listRevision = 0;
+  const listIdentity = computed(() => {
+    const nextKeys = itemKeys.value;
+    if (!areKeySequencesEqual(previousKeySequence, nextKeys)) {
+      previousKeySequence = nextKeys;
+      listRevision += 1;
+    }
+    return listRevision;
+  });
+  const estimateSignature = computed<readonly number[] | number>(() => {
+    const estimateSize = unref(options.estimateSize);
+    if (typeof estimateSize === "number") {
+      return estimateSize;
+    }
+    return unref(options.items).map((item, index) =>
+      estimateSize(index, item)
+    );
+  });
+  const coreEstimateSize: EstimateSize = (index) => {
+    const signature = estimateSignature.value;
+    return typeof signature === "number" ? signature : signature[index] ?? 0;
+  };
+  const coreGetItemKey = (index: number): VirtualItemKey =>
+    itemKeys.value[index] ?? index;
+  const virtualizer = shallowRef(
+    new Virtualizer<VirtualItemKey>({
+      count: unref(options.items).length,
+      estimateSize: coreEstimateSize,
+      overscan: resolveMaybeRef(options.overscan),
+      overscanPx: resolveMaybeRef(options.overscanPx),
+      gap: resolveMaybeRef(options.gap),
+      getItemKey: coreGetItemKey
+    })
+  );
   const itemObservers = new Map<VirtualItemKey, ItemObserverRecord>();
-  let anchorSnapshot: ScrollAnchorSnapshot | null = null;
-  let pendingMeasureAnchorSnapshot: ScrollAnchorSnapshot | null = null;
+  const itemIndices = new Map<VirtualItemKey, number>();
+  let anchorSnapshot: RevisionedAnchorSnapshot | null = null;
+  let pendingMeasureAnchorSnapshot: RevisionedAnchorSnapshot | null = null;
   let previousListIdentity = listIdentity.value;
   let initialScrollDone = false;
   let bottomIntent = false;
   let lastReachStart: ReachRecord | null = null;
   let lastReachEnd: ReachRecord | null = null;
   let lastScrollSample: ScrollSample | null = null;
-  let latestTotalSize = 0;
+  let latestRenderedBounds: RenderedBounds | null = null;
+  let scrollRevision = 0;
+  let isScrolling = false;
   let measureFrame = 0;
   const dirtyMeasurements = new Map<VirtualItemKey, ItemObserverRecord>();
+  let previousLayoutIdentity = listIdentity.value;
+  let previousEstimateSignature = estimateSignature.value;
 
   const updateOptions = () => {
-    virtualizer.value.updateOptions(
-      createVirtualizerOptions(
-        options,
-        defaultGetItemKey,
-        viewport.value.dynamicOverscanPx
+    const nextLayoutIdentity = listIdentity.value;
+    const nextEstimateSignature = estimateSignature.value;
+    if (
+      previousLayoutIdentity !== nextLayoutIdentity ||
+      !areEstimateSignaturesEqual(
+        previousEstimateSignature,
+        nextEstimateSignature
       )
-    );
+    ) {
+      virtualizer.value.invalidateLayout();
+      previousLayoutIdentity = nextLayoutIdentity;
+      previousEstimateSignature = nextEstimateSignature;
+    }
+
+    const overscanPx = Math.max(0, resolveMaybeRef(options.overscanPx) ?? 0);
+    virtualizer.value.updateOptions({
+      count: unref(options.items).length,
+      estimateSize: coreEstimateSize,
+      overscan: resolveMaybeRef(options.overscan),
+      overscanPx,
+      overscanBeforePx:
+        overscanPx + viewport.value.dynamicOverscanBeforePx,
+      overscanAfterPx: overscanPx + viewport.value.dynamicOverscanAfterPx,
+      gap: resolveMaybeRef(options.gap),
+      getItemKey: coreGetItemKey
+    });
   };
 
   const readViewport = (source: "scroll" | "layout" = "layout") => {
@@ -338,32 +423,26 @@ export function useVirtualList<TItem>(
     }
 
     const nextViewport = getScrollMetrics(node, axis.value);
-    const timestamp =
-      typeof performance === "undefined" ? Date.now() : performance.now();
-    const dynamicOverscanPx =
+    const timestamp = now();
+    const dynamicOverscan =
       source === "scroll"
-        ? getDynamicOverscanPx(lastScrollSample, nextViewport, timestamp)
-        : 0;
-    lastScrollSample = { ...nextViewport, timestamp };
-
-    if (
-      source === "scroll" &&
-      bottomIntent &&
-      !isAtEnd(
-        nextViewport,
-        latestTotalSize,
-        resolveMaybeRef(options.bottomThreshold) ?? 24
-      )
-    ) {
-      bottomIntent = false;
+        ? getDynamicOverscan(lastScrollSample, nextViewport, timestamp)
+        : EMPTY_DYNAMIC_OVERSCAN;
+    if (source === "scroll") {
+      lastScrollSample = { ...nextViewport, timestamp };
     }
 
     if (
       viewport.value.scrollOffset !== nextViewport.scrollOffset ||
       viewport.value.viewportSize !== nextViewport.viewportSize ||
-      viewport.value.dynamicOverscanPx !== dynamicOverscanPx
+      viewport.value.dynamicOverscanBeforePx !== dynamicOverscan.before ||
+      viewport.value.dynamicOverscanAfterPx !== dynamicOverscan.after
     ) {
-      viewport.value = { ...nextViewport, dynamicOverscanPx };
+      viewport.value = {
+        ...nextViewport,
+        dynamicOverscanBeforePx: dynamicOverscan.before,
+        dynamicOverscanAfterPx: dynamicOverscan.after
+      };
     }
   };
 
@@ -391,11 +470,29 @@ export function useVirtualList<TItem>(
     let scrollFrame = 0;
     let scrollTimer = 0;
     const scheduleScrollRead = () => {
+      scrollRevision += 1;
+      if (!isScrolling) {
+        lastScrollSample = null;
+      }
+      isScrolling = true;
       node.classList.add("is-scrolling", "inscro-is-scrolling");
       window.clearTimeout(scrollTimer);
       scrollTimer = window.setTimeout(() => {
+        isScrolling = false;
+        lastScrollSample = null;
         node.classList.remove("is-scrolling", "inscro-is-scrolling");
+        readViewport();
       }, 120);
+
+      const nextMetrics = getScrollMetrics(node, axis.value);
+      if (isOutsideRenderedBounds(nextMetrics, latestRenderedBounds)) {
+        if (scrollFrame !== 0) {
+          window.cancelAnimationFrame(scrollFrame);
+          scrollFrame = 0;
+        }
+        readViewport("scroll");
+        return;
+      }
 
       if (scrollFrame !== 0) {
         return;
@@ -407,7 +504,24 @@ export function useVirtualList<TItem>(
       });
     };
 
+    const cancelBottomIntent = () => {
+      bottomIntent = false;
+      scrollRevision += 1;
+      if (anchorSnapshot) {
+        anchorSnapshot = { ...anchorSnapshot, scrollRevision };
+      }
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (isScrollIntentKey(event)) {
+        cancelBottomIntent();
+      }
+    };
+
     node.addEventListener("scroll", scheduleScrollRead, { passive: true });
+    node.addEventListener("wheel", cancelBottomIntent, { passive: true });
+    node.addEventListener("touchstart", cancelBottomIntent, { passive: true });
+    node.addEventListener("pointerdown", cancelBottomIntent, { passive: true });
+    node.addEventListener("keydown", handleKeyDown);
 
     let resizeObserver: ResizeObserver | undefined;
     if (typeof ResizeObserver !== "undefined") {
@@ -427,8 +541,13 @@ export function useVirtualList<TItem>(
       }
 
       window.clearTimeout(scrollTimer);
+      isScrolling = false;
       node.classList.remove("is-scrolling", "inscro-is-scrolling");
       node.removeEventListener("scroll", scheduleScrollRead);
+      node.removeEventListener("wheel", cancelBottomIntent);
+      node.removeEventListener("touchstart", cancelBottomIntent);
+      node.removeEventListener("pointerdown", cancelBottomIntent);
+      node.removeEventListener("keydown", handleKeyDown);
       resizeObserver?.disconnect();
 
       if (typeof ResizeObserver === "undefined") {
@@ -440,6 +559,7 @@ export function useVirtualList<TItem>(
   onBeforeUnmount(() => {
     cleanup?.();
     cleanupItemObservers(itemObservers);
+    itemIndices.clear();
     dirtyMeasurements.clear();
     if (measureFrame !== 0 && typeof window !== "undefined") {
       window.cancelAnimationFrame(measureFrame);
@@ -455,10 +575,12 @@ export function useVirtualList<TItem>(
   const range = computed(() => {
     updateOptions();
     measurementVersion.value;
-    return virtualizer.value.getVirtualRange(
+    const nextRange = virtualizer.value.getVirtualRange(
       viewport.value.scrollOffset,
       viewport.value.viewportSize
     );
+    latestRenderedBounds = getRenderedBounds(nextRange);
+    return nextRange;
   });
 
   const virtualItems = computed(() => {
@@ -472,9 +594,6 @@ export function useVirtualList<TItem>(
   });
 
   const totalSize = computed(() => range.value.totalSize);
-  watch(totalSize, (value) => {
-    latestTotalSize = value;
-  }, { immediate: true });
   const innerStyle = computed(() => getInnerStyle(axis.value, totalSize.value));
 
   watch(
@@ -517,31 +636,41 @@ export function useVirtualList<TItem>(
         bottomIntent = true;
       } else if (pendingMeasureAnchorSnapshot || anchorSnapshot) {
         const listChanged = previousListIdentity !== listIdentity.value;
-        const previousAnchor = listChanged
+        const previousAnchorRecord = listChanged
           ? anchorSnapshot
           : pendingMeasureAnchorSnapshot ?? anchorSnapshot;
         pendingMeasureAnchorSnapshot = null;
-        previousListIdentity = listIdentity.value;
 
-        if (!previousAnchor) {
-          return;
-        }
+        if (previousAnchorRecord) {
+          const previousAnchor = previousAnchorRecord.snapshot;
+          const anchorIsCurrent =
+            previousAnchorRecord.scrollRevision === scrollRevision &&
+            !isScrolling &&
+            !hasActiveTextSelection(node);
 
-        if (bottomIntent || (shouldStickToBottom && previousAnchor.atEnd)) {
-          nextOffset = Math.max(0, totalSize.value - metrics.viewportSize);
-        } else if (shouldPreserveScrollPosition) {
-          const nextAnchorIndex = resolveAnchorIndex(
-            virtualizer.value,
-            previousAnchor
-          );
+          if (bottomIntent) {
+            nextOffset = Math.max(0, totalSize.value - metrics.viewportSize);
+          } else if (
+            anchorIsCurrent &&
+            shouldStickToBottom &&
+            previousAnchor.atEnd
+          ) {
+            nextOffset = Math.max(0, totalSize.value - metrics.viewportSize);
+          } else if (anchorIsCurrent && shouldPreserveScrollPosition) {
+            const nextAnchorIndex = resolveAnchorIndex(
+              virtualizer.value,
+              previousAnchor
+            );
 
-          if (nextAnchorIndex !== -1) {
-            nextOffset =
-              virtualizer.value.getStartForIndex(nextAnchorIndex) -
-              previousAnchor.offset;
+            if (nextAnchorIndex !== -1) {
+              nextOffset =
+                virtualizer.value.getStartForIndex(nextAnchorIndex) -
+                previousAnchor.offset;
+            }
           }
         }
       }
+      previousListIdentity = listIdentity.value;
 
       if (nextOffset !== undefined) {
         const boundedOffset = clamp(
@@ -551,18 +680,26 @@ export function useVirtualList<TItem>(
         );
 
         if (Math.abs(metrics.scrollOffset - boundedOffset) > 0.5) {
+          scrollRevision += 1;
           setNodeScrollOffset(node, axis.value, boundedOffset, "auto");
         }
       }
 
       const nextMetrics = getScrollMetrics(node, axis.value);
-      viewport.value = { ...nextMetrics, dynamicOverscanPx: 0 };
-      anchorSnapshot = createAnchorSnapshot(
+      viewport.value = {
+        ...nextMetrics,
+        dynamicOverscanBeforePx: 0,
+        dynamicOverscanAfterPx: 0
+      };
+      const nextAnchor = createAnchorSnapshot(
         virtualizer.value,
         nextMetrics,
         resolveMaybeRef(options.edgeThreshold) ?? 0,
         threshold
       );
+      anchorSnapshot = nextAnchor
+        ? { snapshot: nextAnchor, scrollRevision }
+        : null;
     },
     { flush: "post" }
   );
@@ -590,7 +727,8 @@ export function useVirtualList<TItem>(
       axis,
       () => viewport.value.scrollOffset,
       () => viewport.value.viewportSize,
-      () => viewport.value.dynamicOverscanPx,
+      () => viewport.value.dynamicOverscanBeforePx,
+      () => viewport.value.dynamicOverscanAfterPx,
       totalSize,
       () => resolveMaybeRef(options.bottomThreshold)
     ],
@@ -604,12 +742,15 @@ export function useVirtualList<TItem>(
         return;
       }
 
-      anchorSnapshot = createAnchorSnapshot(
+      const nextAnchor = createAnchorSnapshot(
         virtualizer.value,
         getScrollMetrics(node, axis.value),
         resolveMaybeRef(options.edgeThreshold) ?? 0,
         resolveMaybeRef(options.bottomThreshold) ?? 24
       );
+      anchorSnapshot = nextAnchor
+        ? { snapshot: nextAnchor, scrollRevision }
+        : null;
     },
     { flush: "post" }
   );
@@ -622,7 +763,8 @@ export function useVirtualList<TItem>(
       () => resolveMaybeRef(options.edgeThreshold),
       () => resolveMaybeRef(options.initialScrollToBottom),
       () => resolveMaybeRef(options.onReachStart),
-      () => resolveMaybeRef(options.onReachEnd)
+      () => resolveMaybeRef(options.onReachEnd),
+      listIdentity
     ],
     () => {
       if (
@@ -641,15 +783,9 @@ export function useVirtualList<TItem>(
 
       const startCallback = resolveMaybeRef(options.onReachStart);
       const endCallback = resolveMaybeRef(options.onReachEnd);
-      const items = unref(options.items);
-      const getItemKey =
-        resolveMaybeRef(options.getItemKey) ?? defaultGetItemKey;
-      const firstKey =
-        items.length > 0 ? getItemKey(items[0] as TItem, 0) : "__empty__";
-      const lastKey =
-        items.length > 0
-          ? getItemKey(items[items.length - 1] as TItem, items.length - 1)
-          : "__empty__";
+      const keys = itemKeys.value;
+      const firstKey = keys[0] ?? "__empty__";
+      const lastKey = keys[keys.length - 1] ?? "__empty__";
 
       if (atStart && shouldCallReach(lastReachStart, firstKey, startCallback)) {
         startCallback?.();
@@ -672,6 +808,75 @@ export function useVirtualList<TItem>(
     { flush: "post" }
   );
 
+  const flushMeasurements = () => {
+    const containerNode = containerRef.value;
+    const metrics = containerNode
+      ? getScrollMetrics(containerNode, axis.value)
+      : null;
+    const snapshot =
+      containerNode && metrics
+        ? createAnchorSnapshot(
+            virtualizer.value,
+            metrics,
+            resolveMaybeRef(options.edgeThreshold) ?? 0,
+            resolveMaybeRef(options.bottomThreshold) ?? 24
+          )
+        : null;
+    const previousAnchor = snapshot
+      ? { snapshot, scrollRevision }
+      : null;
+
+    let changed = false;
+    for (const [dirtyKey, dirtyRecord] of dirtyMeasurements) {
+      if (itemObservers.get(dirtyKey) !== dirtyRecord) {
+        continue;
+      }
+
+      const index = itemIndices.get(dirtyKey);
+      if (index === undefined) {
+        continue;
+      }
+
+      const rect = dirtyRecord.node.getBoundingClientRect();
+      const size = axis.value === "horizontal" ? rect.width : rect.height;
+      changed = virtualizer.value.measure(index, size) || changed;
+    }
+
+    dirtyMeasurements.clear();
+
+    if (changed) {
+      if (
+        previousAnchor &&
+        (!pendingMeasureAnchorSnapshot ||
+          pendingMeasureAnchorSnapshot.scrollRevision !==
+            previousAnchor.scrollRevision)
+      ) {
+        pendingMeasureAnchorSnapshot = previousAnchor;
+      }
+      measurementVersion.value += 1;
+    }
+  };
+
+  const queueMeasurement = (
+    key: VirtualItemKey,
+    record: ItemObserverRecord
+  ) => {
+    dirtyMeasurements.set(key, record);
+    if (typeof window === "undefined") {
+      flushMeasurements();
+      return;
+    }
+
+    if (measureFrame !== 0) {
+      return;
+    }
+
+    measureFrame = window.requestAnimationFrame(() => {
+      measureFrame = 0;
+      flushMeasurements();
+    });
+  };
+
   const measureElement = (
     index: number,
     element: Element | ComponentPublicInstance | null,
@@ -679,9 +884,10 @@ export function useVirtualList<TItem>(
   ) => {
     const node = resolveElement(element);
     const key = keyOverride ?? virtualizer.value.getKeyForIndex(index);
+    itemIndices.set(key, index);
     const previousRecord = itemObservers.get(key);
 
-    if (previousRecord?.node === node && previousRecord.index === index) {
+    if (previousRecord?.node === node) {
       return;
     }
 
@@ -691,65 +897,12 @@ export function useVirtualList<TItem>(
     }
 
     if (!node) {
+      itemIndices.delete(key);
       return;
     }
 
-    const record: ItemObserverRecord = { node, index };
-
-    const flushMeasurements = () => {
-      const containerNode = containerRef.value;
-      const metrics = containerNode
-        ? getScrollMetrics(containerNode, axis.value)
-        : null;
-      const previousAnchor =
-        containerNode && metrics
-          ? createAnchorSnapshot(
-              virtualizer.value,
-              metrics,
-              resolveMaybeRef(options.edgeThreshold) ?? 0,
-              resolveMaybeRef(options.bottomThreshold) ?? 24
-            )
-          : null;
-
-      let changed = false;
-      for (const [dirtyKey, dirtyRecord] of dirtyMeasurements) {
-        if (itemObservers.get(dirtyKey) !== dirtyRecord) {
-          continue;
-        }
-
-        const rect = dirtyRecord.node.getBoundingClientRect();
-        const size = axis.value === "horizontal" ? rect.width : rect.height;
-        changed =
-          virtualizer.value.measure(dirtyRecord.index, size) || changed;
-      }
-
-      dirtyMeasurements.clear();
-
-      if (changed) {
-        pendingMeasureAnchorSnapshot ??= previousAnchor;
-        measurementVersion.value += 1;
-      }
-    };
-
-    const scheduleMeasure = () => {
-      if (typeof window === "undefined") {
-        dirtyMeasurements.set(key, record);
-        flushMeasurements();
-        return;
-      }
-
-      dirtyMeasurements.set(key, record);
-
-      if (measureFrame !== 0) {
-        return;
-      }
-
-      measureFrame = window.requestAnimationFrame(() => {
-        measureFrame = 0;
-        flushMeasurements();
-      });
-    };
-
+    const record: ItemObserverRecord = { node };
+    const scheduleMeasure = () => queueMeasurement(key, record);
     itemObservers.set(key, record);
     scheduleMeasure();
 
@@ -761,20 +914,34 @@ export function useVirtualList<TItem>(
     record.cleanupImages = observeImageLoads(node, scheduleMeasure);
   };
 
-  const scrollToOffset = (
+  const applyScrollOffset = (
     offset: number,
-    behavior: ScrollBehavior = "auto"
+    behavior: ScrollBehavior,
+    preserveBottomIntent: boolean
   ) => {
     const node = containerRef.value;
     if (!node) {
       return;
     }
 
+    if (!preserveBottomIntent) {
+      bottomIntent = false;
+    }
+    scrollRevision += 1;
+    pendingMeasureAnchorSnapshot = null;
     setNodeScrollOffset(node, axis.value, offset, behavior);
     viewport.value = {
       ...getScrollMetrics(node, axis.value),
-      dynamicOverscanPx: 0
+      dynamicOverscanBeforePx: 0,
+      dynamicOverscanAfterPx: 0
     };
+  };
+
+  const scrollToOffset = (
+    offset: number,
+    behavior: ScrollBehavior = "auto"
+  ) => {
+    applyScrollOffset(offset, behavior, false);
   };
 
   const scrollToIndex = (
@@ -834,7 +1001,12 @@ export function useVirtualList<TItem>(
     }
 
     const metrics = getScrollMetrics(node, axis.value);
-    scrollToOffset(Math.max(0, totalSize.value - metrics.viewportSize), behavior);
+    bottomIntent = true;
+    applyScrollOffset(
+      Math.max(0, totalSize.value - metrics.viewportSize),
+      behavior,
+      true
+    );
   };
 
   const reset = (resetOptions: ResetVirtualListOptions = {}) => {
@@ -868,37 +1040,6 @@ export function useVirtualList<TItem>(
     scrollToBottom,
     reset
   };
-}
-
-function createVirtualizerOptions<TItem>(
-  options: UseVirtualListOptions<TItem>,
-  defaultGetItemKey: (item: TItem, index: number) => VirtualItemKey,
-  dynamicOverscanPx = 0
-): VirtualizerOptions<VirtualItemKey> {
-  const items = unref(options.items);
-  const estimateSize = unref(options.estimateSize);
-  const getItemKey = resolveMaybeRef(options.getItemKey) ?? defaultGetItemKey;
-  const overscanPx = Math.max(0, resolveMaybeRef(options.overscanPx) ?? 0);
-
-  return {
-    count: items.length,
-    estimateSize: createEstimateSize(estimateSize, items),
-    overscan: resolveMaybeRef(options.overscan),
-    overscanPx: overscanPx + dynamicOverscanPx,
-    gap: resolveMaybeRef(options.gap),
-    getItemKey: (index) => getItemKey(items[index] as TItem, index)
-  };
-}
-
-function createEstimateSize<TItem>(
-  estimateSize: VueEstimateSize<TItem>,
-  items: readonly TItem[]
-): EstimateSize {
-  if (typeof estimateSize === "number") {
-    return estimateSize;
-  }
-
-  return (index) => estimateSize(index, items[index] as TItem);
 }
 
 function resolveMaybeRef<TValue>(
@@ -1000,35 +1141,51 @@ function getScrollMetrics(node: HTMLElement, axis: Axis) {
   };
 }
 
-function getDynamicOverscanPx(
+const EMPTY_DYNAMIC_OVERSCAN: DynamicOverscan = { before: 0, after: 0 };
+
+function getDynamicOverscan(
   previous: ScrollSample | null,
   next: { scrollOffset: number; viewportSize: number },
   timestamp: number
-): number {
+): DynamicOverscan {
   if (!previous || next.viewportSize <= 0) {
-    return 0;
+    return EMPTY_DYNAMIC_OVERSCAN;
   }
 
-  const delta = Math.abs(next.scrollOffset - previous.scrollOffset);
+  const delta = next.scrollOffset - previous.scrollOffset;
   const elapsed = Math.max(1, timestamp - previous.timestamp);
-  const pixelsPerFrame = (delta / elapsed) * 16;
+  const pixelsPerFrame = (Math.abs(delta) / elapsed) * 16;
 
   if (pixelsPerFrame < next.viewportSize * 0.25) {
-    return 0;
+    return EMPTY_DYNAMIC_OVERSCAN;
   }
 
-  return Math.min(next.viewportSize * 3, delta * 2);
+  const forwardBuffer = Math.min(
+    next.viewportSize * 3,
+    Math.abs(delta) * 2
+  );
+  return delta < 0
+    ? { before: forwardBuffer, after: 0 }
+    : { before: 0, after: forwardBuffer };
 }
 
-function isAtEnd(
+function isOutsideRenderedBounds(
   metrics: { scrollOffset: number; viewportSize: number },
-  totalSize: number,
-  threshold: number
+  bounds: RenderedBounds | null
 ): boolean {
-  return (
-    metrics.scrollOffset + metrics.viewportSize >=
-    totalSize - Math.max(0, threshold)
+  return Boolean(
+    !bounds ||
+      metrics.scrollOffset < bounds.start ||
+      metrics.scrollOffset + metrics.viewportSize > bounds.end
   );
+}
+
+function getRenderedBounds(
+  range: VirtualRange<VirtualItemKey>
+): RenderedBounds | null {
+  const first = range.items[0];
+  const last = range.items[range.items.length - 1];
+  return first && last ? { start: first.start, end: last.end } : null;
 }
 
 function shouldCallReach(
@@ -1036,7 +1193,68 @@ function shouldCallReach(
   edgeKey: VirtualItemKey,
   callback?: () => void
 ): boolean {
-  return Boolean(callback && !previous);
+  return Boolean(
+    callback &&
+      (!previous ||
+        previous.edgeKey !== edgeKey ||
+        previous.callback !== callback)
+  );
+}
+
+function areKeySequencesEqual(
+  previous: readonly VirtualItemKey[],
+  next: readonly VirtualItemKey[]
+): boolean {
+  return (
+    previous.length === next.length &&
+    previous.every((key, index) => key === next[index])
+  );
+}
+
+function areEstimateSignaturesEqual(
+  previous: readonly number[] | number,
+  next: readonly number[] | number
+): boolean {
+  if (typeof previous === "number" || typeof next === "number") {
+    return previous === next;
+  }
+
+  return (
+    previous.length === next.length &&
+    previous.every((size, index) => Object.is(size, next[index]))
+  );
+}
+
+function isScrollIntentKey(event: KeyboardEvent): boolean {
+  return [
+    "ArrowUp",
+    "ArrowDown",
+    "ArrowLeft",
+    "ArrowRight",
+    "PageUp",
+    "PageDown",
+    "Home",
+    "End",
+    " "
+  ].includes(event.key);
+}
+
+function hasActiveTextSelection(node: HTMLElement): boolean {
+  if (typeof window === "undefined" || !window.getSelection) {
+    return false;
+  }
+
+  const selection = window.getSelection();
+  if (!selection || selection.isCollapsed || selection.rangeCount === 0) {
+    return false;
+  }
+
+  const range = selection.getRangeAt(0);
+  return node.contains(range.commonAncestorContainer);
+}
+
+function now(): number {
+  return typeof performance === "undefined" ? Date.now() : performance.now();
 }
 
 function setNodeScrollOffset(
