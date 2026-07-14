@@ -42,6 +42,7 @@ interface ReachRecord {
 interface RevisionedAnchorSnapshot {
   snapshot: ScrollAnchorSnapshot;
   scrollRevision: number;
+  scrollOffset: number;
 }
 
 interface DynamicOverscan {
@@ -436,13 +437,6 @@ export function useVirtualList<TItem>(
 
     const cancelBottomIntent = () => {
       bottomIntentRef.current = false;
-      scrollRevisionRef.current += 1;
-      if (anchorSnapshotRef.current) {
-        anchorSnapshotRef.current = {
-          ...anchorSnapshotRef.current,
-          scrollRevision: scrollRevisionRef.current
-        };
-      }
     };
     const handleKeyDown = (event: KeyboardEvent) => {
       if (isScrollIntentKey(event)) {
@@ -508,7 +502,8 @@ export function useVirtualList<TItem>(
     const previousAnchor = snapshot
       ? {
           snapshot,
-          scrollRevision: scrollRevisionRef.current
+          scrollRevision: scrollRevisionRef.current,
+          scrollOffset: metrics?.scrollOffset ?? 0
         }
       : null;
 
@@ -648,11 +643,11 @@ export function useVirtualList<TItem>(
       ? anchorSnapshotRef.current
       : null;
     const node = containerRef.current;
-    const anchorIsCurrent =
-      previousAnchorRecord?.scrollRevision === scrollRevisionRef.current &&
-      (!node || !hasActiveTextSelection(node));
+    const currentScrollOffset = node
+      ? getScrollMetrics(node, axis).scrollOffset
+      : viewport.scrollOffset;
 
-    if (!previousAnchorRecord || !anchorIsCurrent) {
+    if (!previousAnchorRecord) {
       return viewport.scrollOffset;
     }
 
@@ -669,13 +664,17 @@ export function useVirtualList<TItem>(
       return Math.max(0, virtualizer.getTotalSize() - viewport.viewportSize);
     }
 
-    const nextAnchorIndex = resolveAnchorIndex(virtualizer, previousAnchor);
-    if (nextAnchorIndex === -1) {
+    const nextOffset = resolvePreservedAnchorOffset(
+      virtualizer,
+      previousAnchorRecord,
+      currentScrollOffset
+    );
+    if (nextOffset === null) {
       return viewport.scrollOffset;
     }
 
     return clamp(
-      virtualizer.getStartForIndex(nextAnchorIndex) - previousAnchor.offset,
+      nextOffset,
       0,
       Math.max(0, virtualizer.getTotalSize() - viewport.viewportSize)
     );
@@ -759,24 +758,26 @@ export function useVirtualList<TItem>(
 
       if (previousAnchorRecord) {
         const previousAnchor = previousAnchorRecord.snapshot;
-        const anchorIsCurrent =
-          previousAnchorRecord.scrollRevision === scrollRevisionRef.current &&
-          !hasActiveTextSelection(node);
+        const canPreserveAnchor =
+          listChanged || !hasActiveTextSelection(node);
 
         if (bottomIntentRef.current) {
           nextOffset = Math.max(0, totalSize - metrics.viewportSize);
-        } else if (anchorIsCurrent && stickToBottom && previousAnchor.atEnd) {
+        } else if (
+          canPreserveAnchor &&
+          stickToBottom &&
+          previousAnchor.atEnd
+        ) {
           nextOffset = Math.max(0, totalSize - metrics.viewportSize);
-        } else if (anchorIsCurrent && preserveScrollPosition) {
-          const nextAnchorIndex = resolveAnchorIndex(
+        } else if (canPreserveAnchor && preserveScrollPosition) {
+          const preservedOffset = resolvePreservedAnchorOffset(
             virtualizer,
-            previousAnchor
+            previousAnchorRecord,
+            metrics.scrollOffset
           );
 
-          if (nextAnchorIndex !== -1) {
-            nextOffset =
-              virtualizer.getStartForIndex(nextAnchorIndex) -
-              previousAnchor.offset;
+          if (preservedOffset !== null) {
+            nextOffset = preservedOffset;
           }
         }
       }
@@ -819,7 +820,8 @@ export function useVirtualList<TItem>(
     anchorSnapshotRef.current = nextAnchor
       ? {
           snapshot: nextAnchor,
-          scrollRevision: scrollRevisionRef.current
+          scrollRevision: scrollRevisionRef.current,
+          scrollOffset: nextMetrics.scrollOffset
         }
       : null;
   }, [
@@ -855,16 +857,18 @@ export function useVirtualList<TItem>(
       return;
     }
 
+    const metrics = getScrollMetrics(node, axis);
     const nextAnchor = createAnchorSnapshot(
       virtualizer,
-      getScrollMetrics(node, axis),
+      metrics,
       edgeThreshold,
       bottomThreshold
     );
     anchorSnapshotRef.current = nextAnchor
       ? {
           snapshot: nextAnchor,
-          scrollRevision: scrollRevisionRef.current
+          scrollRevision: scrollRevisionRef.current,
+          scrollOffset: metrics.scrollOffset
         }
       : null;
   }, [
@@ -1344,6 +1348,24 @@ function setNodeScrollOffset(
   } else {
     node.scrollTop = boundedOffset;
   }
+}
+
+function resolvePreservedAnchorOffset(
+  virtualizer: Virtualizer<VirtualItemKey>,
+  record: RevisionedAnchorSnapshot,
+  currentScrollOffset: number
+): number | null {
+  const nextAnchorIndex = resolveAnchorIndex(virtualizer, record.snapshot);
+  if (nextAnchorIndex === -1) {
+    return null;
+  }
+
+  const userScrollDelta = currentScrollOffset - record.scrollOffset;
+  return (
+    virtualizer.getStartForIndex(nextAnchorIndex) -
+    record.snapshot.offset +
+    userScrollDelta
+  );
 }
 
 function createAnchorSnapshot(

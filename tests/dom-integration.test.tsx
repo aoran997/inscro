@@ -263,7 +263,7 @@ describe("React DOM integration", () => {
     await unmountReact(root);
   });
 
-  it("drops a measurement anchor when the user scrolls in the same frame", async () => {
+  it("preserves measurement changes while applying user scroll from the same frame", async () => {
     const items = makeItems(20);
     const { root, container } = await mountReact({
       items,
@@ -282,7 +282,7 @@ describe("React DOM integration", () => {
       await Promise.resolve();
     });
 
-    expect(container.scrollTop).toBe(80);
+    expect(container.scrollTop).toBe(120);
     await unmountReact(root);
   });
 
@@ -327,6 +327,53 @@ describe("React DOM integration", () => {
     await flushReactFrames();
 
     expect(container.scrollTop).toBe(60);
+    await unmountReact(root);
+  });
+
+  it("preserves the visible item on prepend while text is selected", async () => {
+    const items = makeItems(10);
+    const estimateSize = () => 20;
+    const { root, container } = await mountReact({ items, estimateSize });
+    await scrollReact(container, 40);
+
+    const selectedItem = getItemNode("item-2");
+    const range = document.createRange();
+    range.selectNodeContents(selectedItem);
+    const selection = window.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+
+    await act(async () => {
+      root.render(
+        <ReactHarness
+          items={[{ id: "prepended", height: 20 }, ...items]}
+          estimateSize={estimateSize}
+        />
+      );
+    });
+    await flushReactFrames();
+
+    expect(container.scrollTop).toBe(60);
+    await unmountReact(root);
+  });
+
+  it("preserves the visible item after an upward wheel at the top boundary", async () => {
+    const items = makeItems(10);
+    const estimateSize = () => 20;
+    const { root, container } = await mountReact({ items, estimateSize });
+
+    container.dispatchEvent(new WheelEvent("wheel", { deltaY: -100 }));
+    await act(async () => {
+      root.render(
+        <ReactHarness
+          items={[{ id: "prepended", height: 20 }, ...items]}
+          estimateSize={estimateSize}
+        />
+      );
+    });
+    await flushReactFrames();
+
+    expect(container.scrollTop).toBe(20);
     await unmountReact(root);
   });
 

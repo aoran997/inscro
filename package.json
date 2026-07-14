@@ -1,6 +1,6 @@
 {
   "name": "inscro",
-  "version": "0.0.10",
+  "version": "0.0.11",
   "description": "Small virtual list primitives and components for React and Vue.",
   "type": "module",
   "license": "MIT",

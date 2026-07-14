@@ -53,6 +53,7 @@ interface ReachRecord {
 interface RevisionedAnchorSnapshot {
   snapshot: ScrollAnchorSnapshot;
   scrollRevision: number;
+  scrollOffset: number;
 }
 
 interface DynamicOverscan {
@@ -517,10 +518,6 @@ export function useVirtualList<TItem>(
 
     const cancelBottomIntent = () => {
       bottomIntent = false;
-      scrollRevision += 1;
-      if (anchorSnapshot) {
-        anchorSnapshot = { ...anchorSnapshot, scrollRevision };
-      }
     };
     const handleKeyDown = (event: KeyboardEvent) => {
       if (isScrollIntentKey(event)) {
@@ -591,11 +588,11 @@ export function useVirtualList<TItem>(
     const listChanged = previousListIdentity !== listIdentity.value;
     const previousAnchorRecord = listChanged ? anchorSnapshot : null;
     const node = containerRef.value;
-    const anchorIsCurrent =
-      previousAnchorRecord?.scrollRevision === scrollRevision &&
-      (!node || !hasActiveTextSelection(node));
+    const currentScrollOffset = node
+      ? getScrollMetrics(node, axis.value).scrollOffset
+      : viewport.value.scrollOffset;
 
-    if (!previousAnchorRecord || !anchorIsCurrent) {
+    if (!previousAnchorRecord) {
       return viewport.value.scrollOffset;
     }
 
@@ -620,17 +617,17 @@ export function useVirtualList<TItem>(
       return Math.max(0, total - viewport.value.viewportSize);
     }
 
-    const nextAnchorIndex = resolveAnchorIndex(
+    const nextOffset = resolvePreservedAnchorOffset(
       virtualizer.value,
-      previousAnchor
+      previousAnchorRecord,
+      currentScrollOffset
     );
-    if (nextAnchorIndex === -1) {
+    if (nextOffset === null) {
       return viewport.value.scrollOffset;
     }
 
     return clamp(
-      virtualizer.value.getStartForIndex(nextAnchorIndex) -
-        previousAnchor.offset,
+      nextOffset,
       0,
       Math.max(0, total - viewport.value.viewportSize)
     );
@@ -707,28 +704,26 @@ export function useVirtualList<TItem>(
 
         if (previousAnchorRecord) {
           const previousAnchor = previousAnchorRecord.snapshot;
-          const anchorIsCurrent =
-            previousAnchorRecord.scrollRevision === scrollRevision &&
-            !hasActiveTextSelection(node);
+          const canPreserveAnchor =
+            listChanged || !hasActiveTextSelection(node);
 
           if (bottomIntent) {
             nextOffset = Math.max(0, totalSize.value - metrics.viewportSize);
           } else if (
-            anchorIsCurrent &&
+            canPreserveAnchor &&
             shouldStickToBottom &&
             previousAnchor.atEnd
           ) {
             nextOffset = Math.max(0, totalSize.value - metrics.viewportSize);
-          } else if (anchorIsCurrent && shouldPreserveScrollPosition) {
-            const nextAnchorIndex = resolveAnchorIndex(
+          } else if (canPreserveAnchor && shouldPreserveScrollPosition) {
+            const preservedOffset = resolvePreservedAnchorOffset(
               virtualizer.value,
-              previousAnchor
+              previousAnchorRecord,
+              metrics.scrollOffset
             );
 
-            if (nextAnchorIndex !== -1) {
-              nextOffset =
-                virtualizer.value.getStartForIndex(nextAnchorIndex) -
-                previousAnchor.offset;
+            if (preservedOffset !== null) {
+              nextOffset = preservedOffset;
             }
           }
         }
@@ -762,7 +757,11 @@ export function useVirtualList<TItem>(
         threshold
       );
       anchorSnapshot = nextAnchor
-        ? { snapshot: nextAnchor, scrollRevision }
+        ? {
+            snapshot: nextAnchor,
+            scrollRevision,
+            scrollOffset: nextMetrics.scrollOffset
+          }
         : null;
     },
     { flush: "post" }
@@ -806,14 +805,19 @@ export function useVirtualList<TItem>(
         return;
       }
 
+      const metrics = getScrollMetrics(node, axis.value);
       const nextAnchor = createAnchorSnapshot(
         virtualizer.value,
-        getScrollMetrics(node, axis.value),
+        metrics,
         resolveMaybeRef(options.edgeThreshold) ?? 0,
         resolveMaybeRef(options.bottomThreshold) ?? 24
       );
       anchorSnapshot = nextAnchor
-        ? { snapshot: nextAnchor, scrollRevision }
+        ? {
+            snapshot: nextAnchor,
+            scrollRevision,
+            scrollOffset: metrics.scrollOffset
+          }
         : null;
     },
     { flush: "post" }
@@ -887,7 +891,11 @@ export function useVirtualList<TItem>(
           )
         : null;
     const previousAnchor = snapshot
-      ? { snapshot, scrollRevision }
+      ? {
+          snapshot,
+          scrollRevision,
+          scrollOffset: metrics?.scrollOffset ?? 0
+        }
       : null;
 
     let changed = false;
@@ -1344,6 +1352,24 @@ function setNodeScrollOffset(
   } else {
     node.scrollTop = boundedOffset;
   }
+}
+
+function resolvePreservedAnchorOffset(
+  virtualizer: Virtualizer<VirtualItemKey>,
+  record: RevisionedAnchorSnapshot,
+  currentScrollOffset: number
+): number | null {
+  const nextAnchorIndex = resolveAnchorIndex(virtualizer, record.snapshot);
+  if (nextAnchorIndex === -1) {
+    return null;
+  }
+
+  const userScrollDelta = currentScrollOffset - record.scrollOffset;
+  return (
+    virtualizer.getStartForIndex(nextAnchorIndex) -
+    record.snapshot.offset +
+    userScrollDelta
+  );
 }
 
 function createAnchorSnapshot(
